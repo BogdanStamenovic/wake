@@ -34,6 +34,8 @@ MIN_WAKE_LEAD_SECONDS = 600.0
 # ahead of the task rather than alongside it.
 WAKE_LEAD_SECONDS = 300.0
 AGENT_NAME_FLAG = re.compile(r"--name[= ]+(\S+)")
+# `claude -p` / `--print` is a one-shot invocation, not a session holding work.
+PRINT_MODE = re.compile(r"(?:^|\s)(?:-p|--print)(?:\s|$)")
 
 
 class PowerError(Exception):
@@ -164,6 +166,15 @@ def foreign_agents(*, allow: set[str], allow_match: str = "") -> list[str]:
     for pid, argv0, args in _processes():
         if argv0 != "claude" or pid == mine:
             continue
+        # Print-mode processes are tools, not sessions. The task this guard
+        # runs after is precisely the kind of thing that spawns them -- five
+        # parallel scouts, in track's case -- and one lingering a second past
+        # its parent's exit would block the shutdown and leave the machine on
+        # all day. Safe to skip, because nothing that matters is invisible as
+        # a result: whatever spawned it is either a named session, which is
+        # checked below, or a person, who shows up in human_signals().
+        if PRINT_MODE.search(args):
+            continue
         if pattern is not None and pattern.search(args):
             continue
         match = AGENT_NAME_FLAG.search(args)
@@ -261,9 +272,33 @@ def suppress_watchdog() -> bool:
     return result.returncode == 0
 
 
-def power_off() -> None:
+def restore_watchdog() -> bool:
+    """Put the operator's respawn timer back, after a poweroff that did not happen.
+
+    suppress_watchdog runs just before going down. If the shutdown then fails,
+    leaving it stopped means nothing respawns the operator until the next boot
+    -- a machine that is still up and quietly missing its supervisor.
+    """
     result = subprocess.run(
-        ["systemctl", "poweroff"], capture_output=True, text=True, timeout=30, check=False
+        ["systemctl", "--user", "start", "hotline-watchdog.timer"],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    return result.returncode == 0
+
+
+def power_off() -> None:
+    """Power the machine off, via sudo rather than bare systemctl.
+
+    Not a belt-and-braces choice -- a plain `systemctl poweroff` from here is
+    refused. logind's CanPowerOff answers "challenge" for this context and
+    pkcheck reports auth_admin_keep: polkit wants an interactive session to
+    authenticate against, and a user unit on a headless box has none. The
+    request would fail after the task had already run and the guard had
+    already passed, leaving the machine up with nothing to say why.
+    """
+    result = subprocess.run(
+        ["sudo", "-n", "systemctl", "poweroff"],
+        capture_output=True, text=True, timeout=30, check=False,
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()

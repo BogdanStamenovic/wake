@@ -216,7 +216,18 @@ def finish_power(db: WakeDB, config: WakeConfig, task: Task, *, succeeded: bool)
 
     stopped = power.suppress_watchdog()
     LOG.warning("powering off (%s; watchdog suppressed: %s)", armed, stopped)
-    power.power_off()
+    try:
+        power.power_off()
+    except power.PowerError as exc:
+        # A refused poweroff must not take the scheduler down with it, and must
+        # not leave the operator's respawn timer stopped for a shutdown that
+        # never happened. Both were real: NoNewPrivileges=true in the unit
+        # blocked sudo, the PowerError propagated out and killed the daemon,
+        # and the watchdog stayed off on a machine that was still running.
+        if stopped:
+            power.restore_watchdog()
+        LOG.error("poweroff failed, machine stays up: %s", exc)
+        return f"poweroff FAILED, machine stays up: {exc}"
     return f"powering off ({armed})"
 
 

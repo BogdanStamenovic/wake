@@ -8,7 +8,7 @@ so most of what is below is a case where powering off must not happen.
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -194,3 +194,95 @@ def test_arming_writes_zero_first_then_the_time(
     assert len(written) == 2
     assert written[0].startswith("echo 0 >")
     assert f"echo {int(now + 3600)} >" in written[1]
+
+
+def test_print_mode_subprocesses_are_tools_not_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The task being waited on spawns these; one lingering must not block.
+
+    track runs five parallel `claude -p` scouts. They are children of the very
+    command whose completion triggers the shutdown, so any that outlives its
+    parent by a moment would hold the machine up until somebody noticed.
+    """
+    monkeypatch.setattr(power, "_processes", lambda: _processes(
+        (70, "claude", "/opt/claude-code/bin/claude -p --model sonnet --tools WebSearch"),
+        (71, "claude", "/opt/claude-code/bin/claude --print --model sonnet"),
+    ))
+    assert power.foreign_agents(allow=set()) == []
+
+
+def test_a_named_session_is_not_excused_by_a_p_in_its_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`-p` must be a flag, not any stray token in a tasking prompt."""
+    monkeypatch.setattr(power, "_processes", lambda: _processes(
+        (80, "claude", "/opt/claude-code/bin/claude --name track-dev run a -pass over the data"),
+    ))
+    assert power.foreign_agents(allow=set()) == ["track-dev"]
+
+
+def test_power_off_goes_through_sudo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare `systemctl poweroff` is refused from a headless user unit.
+
+    logind answers "challenge" and polkit reports auth_admin_keep: it wants an
+    interactive session to authenticate against and there is none. The failure
+    would land after the task ran and the guard passed, so the machine would
+    stay up with nothing obvious to blame.
+    """
+    seen: list[list[str]] = []
+
+    class _Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def record(cmd: list[str], **kw: Any) -> _Ok:
+        seen.append(cmd)
+        return _Ok()
+
+    monkeypatch.setattr(power.subprocess, "run", record)
+    power.power_off()
+    assert seen == [["sudo", "-n", "systemctl", "poweroff"]]
+
+
+def test_a_refused_poweroff_puts_the_watchdog_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The machine is still up, so the operator's respawn timer must come back.
+
+    Leaving it stopped after a shutdown that did not happen means a running
+    machine quietly without its supervisor until the next boot.
+    """
+    from wake import server
+    from wake.config import WakeConfig
+    from wake.models import Task
+
+    events: list[str] = []
+    monkeypatch.setattr(power, "presence", lambda **kw: Presence())
+    def stopped() -> bool:
+        events.append("stopped")
+        return True
+
+    def restored() -> bool:
+        events.append("restored")
+        return True
+
+    monkeypatch.setattr(power, "suppress_watchdog", stopped)
+    monkeypatch.setattr(power, "restore_watchdog", restored)
+
+    def refuse() -> None:
+        raise power.PowerError("sudo blocked by NoNewPrivileges")
+
+    monkeypatch.setattr(power, "power_off", refuse)
+
+    task = Task(
+        id="t", task="true", at=1.0, backend="shell", target=None, status="pending",
+        origin="archserver", created_at=1.0, updated_at=1.0, rev=1, then_do="poweroff",
+    )
+
+    class _DB:
+        def tasks(self, **kw: object) -> list[Task]:
+            return []
+
+    outcome = server.finish_power(
+        cast("Any", _DB()), WakeConfig(origin="archserver"), task, succeeded=False
+    )
+    assert "poweroff FAILED" in outcome
+    assert events == ["stopped", "restored"]
