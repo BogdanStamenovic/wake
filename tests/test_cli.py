@@ -199,3 +199,35 @@ def test_version_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
         main(["--version"])
     assert exit_info.value.code == 0
     assert "wake" in capsys.readouterr().out
+
+
+def test_re_adding_the_same_id_rearms_and_exits_zero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """track re-arms track-<assignment> on every run; this must never crash."""
+    assert main(["add", "--at", "+1h", "--task", "track run abc", "--id", "track-abc"]) == 0
+    assert capsys.readouterr().out.strip() == "track-abc"
+
+    assert main(["add", "--at", "+2h", "--task", "track run abc", "--id", "track-abc"]) == 0
+    out = capsys.readouterr()
+    assert out.out.strip() == "track-abc"
+    assert out.err == "", "a re-arm is not a warning"
+
+    main(["list", "--all", "--json"])
+    rows = json.loads(capsys.readouterr().out)
+    assert len(rows) == 1, "never two rows racing to fire"
+
+
+def test_rearming_a_fired_task_puts_it_back_in_the_queue(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    marker = tmp_path / "ran"
+    main(["add", "--at", "+1h", "--task", f"touch {marker}", "--id", "track-abc"])
+    main(["fire", "track-abc"])
+    capsys.readouterr()
+
+    main(["add", "--at", "+2h", "--task", f"touch {marker}", "--id", "track-abc"])
+    capsys.readouterr()
+    main(["list", "--json"])
+    rows = json.loads(capsys.readouterr().out)
+    assert [r["status"] for r in rows] == ["pending"]

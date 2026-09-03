@@ -127,11 +127,23 @@ class WakeDB:
         id: str | None = None,
         status: str = "pending",
     ) -> Task:
+        """Create a task, or re-arm the one already holding ``id``.
+
+        Re-arming rather than failing is what makes an explicit ``--id`` useful:
+        a caller that owns a recurring timer (``track`` re-arms
+        ``track-<assignment>`` on every run) can re-add the same id forever and
+        know it never ends up with two rows racing to fire.
+        """
         if backend not in BACKENDS:
             raise WakeError(f"unknown backend {backend!r}, expected one of {BACKENDS}")
         if status not in STATUSES:
             raise WakeError(f"unknown status {status!r}, expected one of {STATUSES}")
         with self._lock:
+            if id is not None and self.get(id) is not None:
+                return self.rearm(
+                    id, task=task, at=at, backend=backend, target=target,
+                    origin=origin, owner=owner, status=status,
+                )
             now = time.time()
             row = Task(
                 id=id or uuid.uuid4().hex,
@@ -154,6 +166,49 @@ class WakeDB:
             )
             self._conn.commit()
             return row
+
+    def rearm(
+        self,
+        id: str,
+        *,
+        task: str,
+        at: float,
+        backend: str,
+        target: str | None,
+        origin: str,
+        owner: str = "",
+        status: str = "pending",
+    ) -> Task:
+        """Point an existing task at a new time, unconditionally.
+
+        Deliberately NOT routed through ``merge``. The two look similar and
+        mean opposite things: ``merge`` resolves a conflict between two peers
+        that each wrote, and is allowed to discard the incoming row for being
+        older. This is a local instruction -- "the timer is now at T" -- and
+        must never be discarded. Sending it through the last-write-wins
+        comparison would mean two ``add`` calls landing on the same float
+        timestamp silently drop the second, leaving a re-armed timer sitting at
+        its old time with nothing on stderr to say so.
+
+        Clears ``fired_at`` and ``error`` with the reset: the row is being
+        reused for the next occurrence, and stale outcome fields on a pending
+        task would misreport what happened.
+        """
+        with self._lock:
+            existing = self.get(id)
+            if existing is None:
+                raise WakeError(f"no such task: {id}")
+            now = time.time()
+            rev = self._next_rev()
+            self._conn.execute(
+                "UPDATE tasks SET task=?, at=?, backend=?, target=?, status=?, origin=?, "
+                "owner=?, updated_at=?, rev=?, fired_at=NULL, error=NULL WHERE id=?",
+                (task, at, backend, target, status, origin, owner, now, rev, id),
+            )
+            self._conn.commit()
+            updated = self.get(id)
+            assert updated is not None
+            return updated
 
     def merge(self, incoming: Task) -> Task:
         """Insert or last-write-wins-update a task arriving from a sync peer.

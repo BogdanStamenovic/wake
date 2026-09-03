@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -165,6 +166,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return handler()
     except (WakeError, WhenError, SyncError, BackendError) as exc:
         print(f"wake: error: {exc}", file=sys.stderr)
+        return 1
+    except sqlite3.Error as exc:
+        # A database fault is a failed operation, not a bug to dump a stack
+        # for at someone driving this from a shell script.
+        print(f"wake: error: database: {exc}", file=sys.stderr)
         return 1
 
 

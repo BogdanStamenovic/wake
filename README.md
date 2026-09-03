@@ -67,7 +67,7 @@ wake fire <id>
 | `--backend` | `shell` (default), `wol`, `rtcwake`, `notify`, or `call` |
 | `--target` | Backend-specific: a MAC for `wol`, a hotline agent name for `notify`/`call` |
 | `--on` | Which machine fires it, by `ORIGIN` name. Default: the server |
-| `--id` | Explicit task id instead of a generated one (useful for idempotent re-adds) |
+| `--id` | Explicit task id instead of a generated one. Re-adding an id that exists **re-arms** it — see below |
 
 Every subcommand also accepts `-v/--verbose`, `-q/--quiet`, `--version`, and
 `--config <path>` (a `KEY=value` env file — see Configuration below).
@@ -151,6 +151,27 @@ no claims, nothing to time out — two machines cannot both pick up the same row
 because they are querying for different owners. `wake add --on laptop` runs on
 the laptop even though the row lives on the server too; `wake add` with no
 `--on` runs on the server even though the laptop has a copy.
+
+### Re-arming a recurring timer
+
+`wake` has no recurrence syntax, so a caller that wants one owns it: it re-adds
+the next occurrence itself after observing a task fire. Passing the same
+`--id` every time is what makes that safe. Re-adding an existing id points that
+row at the new time, resets it to `pending`, and clears any previous `fired_at`
+or `error` — one row, re-armed, rather than a second row racing the first. An
+interrupted run therefore cannot leave two timers for the same thing.
+
+This is deliberately *not* the same code path as sync's conflict resolution,
+though the two look alike. `merge` settles a disagreement between two peers
+that each wrote, and may discard the incoming row for being older. A re-add is
+an instruction — "the timer is now at T" — and is never discarded. Routing it
+through last-write-wins would mean two adds landing on the same float timestamp
+silently drop the second, leaving the timer at its old time with nothing on
+stderr to say so.
+
+The same rule applies over HTTP, keyed on whether the body carries
+`updated_at`: a sync push sends a full task and so has one, and merges; a thin
+`{task, at, id}` from a Shortcut or a bot has none, and re-arms.
 
 ### How sync works
 

@@ -249,3 +249,14 @@ def test_the_scheduler_thread_survives_a_backend_blowing_up(
     instance.close()
 
     assert len(calls) >= 2, "the loop stopped after the first exception"
+
+
+def test_an_external_re_add_rearms_the_same_id(service: WakeService, db: WakeDB) -> None:
+    """No updated_at in the body means an instruction, not a stale sync push."""
+    service.add({"task": "track run abc", "at": 100.0, "id": "track-abc"})
+    db.mark_fired("track-abc")
+    again = service.add({"task": "track run abc", "at": 900.0, "id": "track-abc"})
+
+    assert again["at"] == 900.0
+    assert again["status"] == "pending"
+    assert len(db.tasks(include_all=True)) == 1

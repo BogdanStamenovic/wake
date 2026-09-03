@@ -57,7 +57,20 @@ class WakeService:
         owner = str(body.get("owner") or "")
         task_id = body.get("id")
         try:
-            if task_id:
+            # Two callers reach this route and they mean different things.
+            # A sync push sends a full Task.to_dict(), so it carries
+            # updated_at, and must go through merge's last-write-wins: it may
+            # legitimately be stale. Anything else -- a Shortcut, a bot, track
+            # re-arming a recurring id -- is an instruction, not a claim about
+            # what happened when, so it re-arms unconditionally.
+            if task_id and "updated_at" not in body:
+                row = self.db.add(
+                    task=task_text, at=at, backend=backend,
+                    target=str(target) if target else None, origin=origin,
+                    owner=owner, id=str(task_id),
+                    status=str(body.get("status", "pending")),
+                )
+            elif task_id:
                 existing = self.db.get(str(task_id))
                 # A sync push carries the device's own created_at/updated_at (it
                 # sent a full Task.to_dict()) -- that timestamp is what merge()'s

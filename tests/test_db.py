@@ -219,3 +219,68 @@ def test_migration_is_idempotent(tmp_path: Path) -> None:
         _add(first)
     with WakeDB(path) as second:
         assert len(second.tasks()) == 1
+
+
+# -- re-arming a recurring id -----------------------------------------------
+# `track` re-adds track-<assignment> on every run and relies on this being
+# idempotent, so that an interrupted run cannot leave two timers racing.
+
+
+def test_adding_an_existing_id_rearms_instead_of_failing(db: WakeDB) -> None:
+    first = _add(db, id="track-abc", at=100.0)
+    again = _add(db, id="track-abc", at=900.0)
+    assert again.id == first.id
+    assert again.at == 900.0
+    assert len(db.tasks(include_all=True)) == 1, "never two rows racing to fire"
+
+
+def test_rearming_resets_a_fired_task_to_pending(db: WakeDB) -> None:
+    _add(db, id="track-abc", at=100.0)
+    db.mark_fired("track-abc")
+    again = _add(db, id="track-abc", at=900.0)
+    assert again.status == "pending"
+    assert again.fired_at is None
+
+
+def test_rearming_clears_a_previous_failure(db: WakeDB) -> None:
+    _add(db, id="track-abc", at=100.0)
+    db.mark_failed("track-abc", "exited 1")
+    again = _add(db, id="track-abc", at=900.0)
+    assert again.status == "pending"
+    assert again.error is None
+
+
+def test_rearming_keeps_the_original_creation_time(db: WakeDB) -> None:
+    first = _add(db, id="track-abc", at=100.0)
+    again = _add(db, id="track-abc", at=900.0)
+    assert again.created_at == first.created_at
+
+
+def test_rearming_makes_the_row_sync_again(db: WakeDB) -> None:
+    first = _add(db, id="track-abc", at=100.0)
+    db.mark_pushed("track-abc", first.rev)
+    assert db.unpushed("testbox") == []
+    _add(db, id="track-abc", at=900.0)
+    assert [t.id for t in db.unpushed("testbox")] == ["track-abc"]
+
+
+def test_rearming_is_never_dropped_for_being_the_same_instant(db: WakeDB) -> None:
+    """The reason rearm does not go through merge's last-write-wins."""
+    first = _add(db, id="track-abc", at=100.0)
+    again = db.rearm(
+        "track-abc", task="echo hi", at=900.0, backend="shell",
+        target=None, origin="testbox", status="pending",
+    )
+    # Forced equal timestamps: merge would discard this, rearm must not.
+    db._conn.execute(
+        "UPDATE tasks SET updated_at = ? WHERE id = ?", (first.updated_at, "track-abc")
+    )
+    db._conn.commit()
+    assert again.at == 900.0
+
+
+def test_rearming_a_missing_id_raises(db: WakeDB) -> None:
+    with pytest.raises(WakeError):
+        db.rearm(
+            "nope", task="x", at=1.0, backend="shell", target=None, origin="testbox"
+        )
