@@ -1,0 +1,44 @@
+# The always-on half: holds the authoritative task database, answers the HTTP
+# API, and fires every task no device has claimed.
+#
+# A user unit, like hotline-ios's, not a system one: wake serve needs no
+# privileges it does not get as this user, and keeping it in the user manager
+# means the database lives under $HOME with the rest of the operator's state.
+# Settings are NOT passed through Environment= or EnvironmentFile= -- wake
+# reads ~/.config/wake/wake.env itself, so the API key stays in one 0600 file
+# instead of also sitting in `systemctl show` output.
+#
+#   install -Dm644 systemd/wake-server.service ~/.config/systemd/user/wake-server.service
+#   systemctl --user daemon-reload && systemctl --user enable --now wake-server.service
+
+[Unit]
+Description=wake: authoritative task database, HTTP API and firing loop
+Documentation=https://github.com/BogdanStamenovic/wake
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=%h/.config/wake/wake.env
+
+[Service]
+Type=simple
+WorkingDirectory=%h/data/wake
+ExecStart=%h/data/wake/.venv/bin/wake serve
+# Creates ~/.local/state/wake before the unit starts. The database's parent
+# directory has to exist as a real directory, not as a path wake happens to
+# mkdir -p on first run, or a hardened unit fails at namespace setup instead.
+StateDirectory=wake
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+ReadWritePaths=%h/.local/state/wake
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,13 @@
+# One sync pass. Driven by wake-sync.timer; not enabled on its own.
+
+[Unit]
+Description=wake: one push/pull against the server
+Documentation=https://github.com/BogdanStamenovic/wake
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=%h/.config/wake/wake.env
+
+[Service]
+Type=oneshot
+ExecStart=%h/data/wake/.venv/bin/wake sync
+StateDirectory=wake

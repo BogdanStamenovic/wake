@@ -1,0 +1,201 @@
+"""The CLI contract: what lands on stdout, what lands on stderr, what exits what.
+
+Other tools parse this. `add` must print an id and nothing else; `list --json`
+must print JSON and nothing else; every diagnostic goes to stderr.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from wake.cli import main
+
+
+@pytest.fixture(autouse=True)
+def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test may read the operator's real ~/.config/wake/wake.env."""
+    monkeypatch.setenv("WAKE_CONFIG", str(tmp_path / "absent.env"))
+    monkeypatch.setenv("WAKE_DB_PATH", str(tmp_path / "wake.db"))
+    monkeypatch.setenv("WAKE_ORIGIN", "testbox")
+    monkeypatch.delenv("WAKE_SERVER_URL", raising=False)
+
+
+def test_add_prints_only_the_id(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["add", "--at", "+1h", "--task", "echo hi"]) == 0
+    out = capsys.readouterr()
+    assert out.out.strip().isalnum()
+    assert len(out.out.strip()) == 32
+    assert out.err == ""
+
+
+def test_add_rejects_a_time_it_cannot_parse(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["add", "--at", "whenever", "--task", "x"]) == 1
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert "wake: error" in out.err
+
+
+def test_add_rejects_a_relative_offset_with_no_unit(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["add", "--at", "+5", "--task", "x"]) == 1
+    assert "no unit" in capsys.readouterr().err
+
+
+def test_a_missing_required_flag_is_a_usage_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["add", "--at", "+1h"]) == 2
+    assert "wake: error" in capsys.readouterr().err
+
+
+def test_an_unknown_backend_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["add", "--at", "+1h", "--task", "x", "--backend", "telepathy"]) == 2
+    capsys.readouterr()
+
+
+def test_list_json_is_parseable_and_alone_on_stdout(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["add", "--at", "+1h", "--task", "echo hi"])
+    capsys.readouterr()
+    assert main(["list", "--json"]) == 0
+    out = capsys.readouterr()
+    rows = json.loads(out.out)
+    assert len(rows) == 1
+    assert rows[0]["task"] == "echo hi"
+    assert out.err == ""
+
+
+def test_list_table_says_so_when_empty(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["list"]) == 0
+    assert capsys.readouterr().out.strip() == "no tasks"
+
+
+def test_list_hides_cancelled_tasks_until_all(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["add", "--at", "+1h", "--task", "echo hi"])
+    task_id = capsys.readouterr().out.strip()
+    main(["cancel", task_id])
+    capsys.readouterr()
+
+    main(["list", "--json"])
+    assert json.loads(capsys.readouterr().out) == []
+    main(["list", "--all", "--json"])
+    assert json.loads(capsys.readouterr().out)[0]["status"] == "cancelled"
+
+
+def test_cancel_reports_a_missing_id_as_a_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["cancel", "nosuchid"]) == 1
+    assert "no such task" in capsys.readouterr().err
+
+
+def test_the_on_flag_records_an_owner(capsys: pytest.CaptureFixture[str]) -> None:
+    main(["add", "--at", "+1h", "--task", "x", "--on", "laptop"])
+    capsys.readouterr()
+    main(["list", "--json"])
+    assert json.loads(capsys.readouterr().out)[0]["owner"] == "laptop"
+
+
+def test_an_explicit_id_is_honoured(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["add", "--at", "+1h", "--task", "x", "--id", "my-own-id"]) == 0
+    assert capsys.readouterr().out.strip() == "my-own-id"
+
+
+def test_quiet_silences_progress_but_not_errors(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["-q", "cancel", "nosuchid"]) == 1
+    assert "wake: error" in capsys.readouterr().err
+
+
+def test_fire_runs_a_task_ahead_of_its_schedule(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    marker = tmp_path / "fired"
+    main(["add", "--at", "+10h", "--task", f"touch {marker}"])
+    task_id = capsys.readouterr().out.strip()
+
+    assert main(["fire", task_id]) == 0
+    capsys.readouterr()
+    assert marker.exists()
+    main(["list", "--all", "--json"])
+    assert json.loads(capsys.readouterr().out)[0]["status"] == "fired"
+
+
+def test_a_failing_fire_records_the_error_and_exits_one(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["add", "--at", "+10h", "--task", "exit 7"])
+    task_id = capsys.readouterr().out.strip()
+
+    assert main(["fire", task_id]) == 1
+    capsys.readouterr()
+    main(["list", "--all", "--json"])
+    row = json.loads(capsys.readouterr().out)[0]
+    assert row["status"] == "failed"
+    assert "exited 7" in row["error"]
+
+
+def test_sync_on_a_server_is_a_no_op(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WAKE_ROLE", "server")
+    assert main(["sync"]) == 0
+    assert "source of truth" in capsys.readouterr().err
+
+
+def test_sync_without_a_server_url_fails_cleanly(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["sync"]) == 1
+    assert "no server configured" in capsys.readouterr().err
+
+
+def test_agent_once_fires_only_this_machines_tasks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mine = tmp_path / "mine"
+    theirs = tmp_path / "theirs"
+    main(["add", "--at", "+0s", "--task", f"touch {mine}", "--on", "testbox"])
+    main(["add", "--at", "+0s", "--task", f"touch {theirs}", "--on", "otherbox"])
+    capsys.readouterr()
+
+    assert main(["agent", "--once"]) == 0
+    capsys.readouterr()
+    assert mine.exists()
+    assert not theirs.exists(), "a device must not run another machine's task"
+
+
+def test_agent_once_leaves_server_owned_tasks_alone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    marker = tmp_path / "servers"
+    main(["add", "--at", "+0s", "--task", f"touch {marker}"])
+    capsys.readouterr()
+    assert main(["agent", "--once"]) == 0
+    capsys.readouterr()
+    assert not marker.exists(), "an unassigned task belongs to the server"
+
+
+def test_a_bad_config_file_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bad = tmp_path / "bad.env"
+    bad.write_text("this line has no equals sign\n")
+    monkeypatch.setenv("WAKE_CONFIG", str(bad))
+    assert main(["list"]) == 2
+    assert "expected KEY=value" in capsys.readouterr().err
+
+
+def test_version_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--version"])
+    assert exit_info.value.code == 0
+    assert "wake" in capsys.readouterr().out

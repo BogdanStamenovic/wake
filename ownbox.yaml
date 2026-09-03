@@ -1,0 +1,21 @@
+schema: 1
+name: wake
+description: Schedule and fire wake-up tasks across a server/device pair
+homepage: https://github.com/BogdanStamenovic/wake
+tags: [cli, scheduler, wake-on-lan, hotline, python]
+install:
+  platforms: [linux, darwin]
+  setup:
+    linux:
+      - python -m venv .venv
+      - .venv/bin/python -m pip install -e .
+    darwin:
+      - python -m venv .venv
+      - .venv/bin/python -m pip install -e .
+  update:
+    linux: [.venv/bin/python -m pip install -e .]
+    darwin: [.venv/bin/python -m pip install -e .]
+  remove: []
+command:
+  linux: .venv/bin/wake
+  darwin: .venv/bin/wake

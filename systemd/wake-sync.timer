@@ -1,0 +1,26 @@
+# The laptop alternative to wake-agent.service.
+#
+# Persistent=true is the reason to prefer it there: after a suspend or a
+# shutdown the timer fires once on resume to catch up, where a daemon would
+# have been frozen mid-sleep and a plain interval timer would silently have
+# skipped every window it was suspended through.
+#
+# It only syncs. A device that must also *fire* its own tasks on time wants
+# wake-agent.service; a timer that runs every two minutes cannot honour an
+# alarm to the second.
+#
+#   install -Dm644 systemd/wake-sync.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now wake-sync.timer
+
+[Unit]
+Description=wake: sync with the server periodically
+Documentation=https://github.com/BogdanStamenovic/wake
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Persistent=true
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
