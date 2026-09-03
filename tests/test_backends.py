@@ -4,6 +4,18 @@ The wol test opens an actual UDP socket and reads the packet back; the
 hotline-ios tests run a throwaway HTTP server and assert on the JSON that
 arrives. Nothing here asserts that wake *called* a function -- only that the
 bytes on the wire are the ones the other side documents.
+
+The hotline-ios half is still a stub of a peer, though, and a stub written
+from reading that peer's source will happily agree with a test written by the
+same hand. What has been checked against the running daemon on this box, by
+hand rather than here: the ``/api/v1/say`` and ``/api/v1/call`` paths exist and
+reject an empty ``text``/``reason`` with a 400, which pins the route and the
+required field name; and a real ``notify`` fired end to end and landed in a
+channel. Not checked live: the ``X-Hotline-Key`` header name, because that
+daemon runs with an empty ``HOTLINE_API_KEY`` and gates on an IP allowlist
+instead, so it never reads the header -- that one rests on reading
+``authorise()``. And ``call`` itself has never been fired for real, because it
+rings a phone.
 """
 
 from __future__ import annotations
@@ -78,6 +90,20 @@ def test_magic_packet_accepts_the_usual_mac_spellings(form: str) -> None:
 def test_magic_packet_refuses_anything_that_is_not_a_mac(bad: str) -> None:
     with pytest.raises(BackendError, match="not a MAC address"):
         magic_packet(bad)
+
+
+def test_wol_targets_port_9() -> None:
+    """Pinned separately because the send test below has to move it.
+
+    Port 9 (discard) is where a NIC's Wake-on-LAN listener expects the magic
+    packet. The test that watches a datagram arrive cannot bind port 9 -- it is
+    privileged -- so it overwrites this constant to reach its own listener,
+    which means that test would stay green if the port were changed to
+    something wrong. This is the assertion that would not.
+    """
+    from wake import backends
+
+    assert backends.WOL_PORT == 9
 
 
 def test_wol_sends_the_packet_over_a_real_socket() -> None:
