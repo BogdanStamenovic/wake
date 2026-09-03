@@ -10,9 +10,14 @@
 [Unit]
 Description=wake: sync with the server and fire this machine's own tasks
 Documentation=https://github.com/BogdanStamenovic/wake
-After=network-online.target
-Wants=network-online.target
 ConditionPathExists=%h/.config/wake/wake.env
+
+# There is deliberately no network-online.target ordering here. That target
+# does not exist in a user manager -- `systemctl --user show network-online.target`
+# reports LoadState=not-found on this box -- so Wants=/After= on it is silently
+# a no-op that reads like a guarantee. What actually makes this safe is that
+# the sync treats an unreachable server as retryable: it logs and tries again
+# next cycle rather than exiting.
 
 [Service]
 Type=simple

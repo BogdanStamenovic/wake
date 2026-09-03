@@ -11,7 +11,9 @@ UNIT_DIR="${HOME}/.config/systemd/user"
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/wake"
 CONFIG_DIR="${HOME}/.config/wake"
 
-for unit in wake-server.service wake-agent.service wake-sync.timer wake-sync.service; do
+UNITS=(wake-server.service wake-agent.service wake-sync.timer wake-sync.service)
+
+for unit in "${UNITS[@]}"; do
   if [[ -f ${UNIT_DIR}/${unit} ]]; then
     systemctl --user disable --now "${unit}" 2>/dev/null || true
     rm -f "${UNIT_DIR}/${unit}"
@@ -19,6 +21,15 @@ for unit in wake-server.service wake-agent.service wake-sync.timer wake-sync.ser
   fi
 done
 systemctl --user daemon-reload
+
+# Disabling and deleting is not enough. A unit that was in a failed state keeps
+# a runtime entry after its file is gone -- `systemctl --user list-units --all`
+# then shows it as "not-found failed", and systemd holds a job for a unit it
+# can no longer find. Verified on this box: only reset-failed clears it, and a
+# daemon-reload does not. Harmless on units that never failed.
+for unit in "${UNITS[@]}"; do
+  systemctl --user reset-failed "${unit}" 2>/dev/null || true
+done
 
 # Refuse to rm anything that resolved to a surprise. The variables are built
 # from $HOME, and an empty $HOME would otherwise aim this at /.

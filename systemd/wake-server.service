@@ -14,9 +14,12 @@
 [Unit]
 Description=wake: authoritative task database, HTTP API and firing loop
 Documentation=https://github.com/BogdanStamenovic/wake
-After=network-online.target
-Wants=network-online.target
 ConditionPathExists=%h/.config/wake/wake.env
+
+# There is deliberately no network-online.target ordering here: that target does
+# not exist in a user manager (LoadState=not-found), so depending on it is a
+# silent no-op dressed up as a guarantee. `wake serve` does not need it anyway
+# -- it binds a listening socket and does not reach out at startup.
 
 [Service]
 Type=simple
