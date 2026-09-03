@@ -8,9 +8,12 @@ would agree with itself while the real pair disagreed.
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Any, ClassVar
 
 import pytest
 
@@ -231,3 +234,90 @@ def test_a_wrong_api_key_is_refused(
         server.httpd.shutdown()
         thread.join(timeout=5)
         server.close()
+
+
+# -- claims the docstrings make, which nothing was asserting -----------------
+
+
+def test_sync_pushes_before_it_pulls(
+    device_db: WakeDB, live_server: WakeConfig
+) -> None:
+    """Ordering, pinned.
+
+    Push first so a row written a moment ago is on the server before this
+    device asks what the server knows. Pulling first leaves the just-created
+    row outside the pulled revision, so the row comes back on the *following*
+    cycle and sync takes two cycles to settle instead of one.
+
+    The first cycle returns (1, 1), not (1, 0): the pull legitimately hands
+    back the row this device just pushed, because pushing advanced the
+    server's revision past the device's pull cursor. merge discards it as a
+    tie and nothing is written, so the count is the only trace.
+    """
+    device_db.add(task="just written", at=1.0, backend="shell", target=None, origin="laptop")
+
+    pushed, _ = sync(device_db, live_server)
+    assert pushed == 1, "the local row must go up on this cycle, before the pull"
+    assert sync(device_db, live_server) == (0, 0), "one cycle must reach a fixed point"
+
+
+class _FlakyHandler(BaseHTTPRequestHandler):
+    """Accepts `accept_first` task posts, then fails everything after."""
+
+    accept_first: ClassVar[int] = 1
+    accepted: ClassVar[list[str]] = []
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        pass
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        body = json.loads(self.rfile.read(length) or b"{}")
+        if len(_FlakyHandler.accepted) < _FlakyHandler.accept_first:
+            _FlakyHandler.accepted.append(str(body.get("id", "")))
+            payload, status = json.dumps(body).encode(), 200
+        else:
+            payload, status = b'{"error": "gone away"}', 500
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+
+def test_a_push_that_dies_halfway_resumes_rather_than_restarts(
+    device_db: WakeDB,
+) -> None:
+    """Each row is acknowledged individually, so a server that goes away
+    mid-push leaves what it accepted marked pushed and the rest pending."""
+    _FlakyHandler.accepted = []
+    _FlakyHandler.accept_first = 1
+    httpd = HTTPServer(("127.0.0.1", 0), _FlakyHandler)
+    thread = threading.Thread(target=httpd.serve_forever, args=(0.02,), daemon=True)
+    thread.start()
+    try:
+        config = WakeConfig(
+            role="device", origin="laptop",
+            server_url=f"http://127.0.0.1:{httpd.server_address[1]}",
+        )
+        for name in ("a", "b", "c"):
+            device_db.add(
+                task=name, at=1.0, backend="shell", target=None, origin="laptop", id=name
+            )
+
+        with pytest.raises(SyncError, match="500"):
+            push(device_db, config)
+
+        remaining = [t.id for t in device_db.unpushed("laptop")]
+        assert _FlakyHandler.accepted == ["a"]
+        assert remaining == ["b", "c"], "only the unacknowledged rows may retry"
+
+        # The server comes back: the next run sends two, not three.
+        _FlakyHandler.accept_first = 99
+        assert push(device_db, config) == 2
+        assert _FlakyHandler.accepted == ["a", "b", "c"]
+        assert device_db.unpushed("laptop") == []
+    finally:
+        httpd.shutdown()
+        thread.join(timeout=5)
+        httpd.server_close()

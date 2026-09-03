@@ -280,7 +280,15 @@ compares a value against the constant that produced it passes whatever that
 constant becomes — `assert config.port == DEFAULT_PORT` is happy with any
 port. Seven of wake's checks were that shape until it said so, among them the
 default bind address, both loop periods, and the last-write-wins tie-break.
-All fifteen mutations are caught now; run it after changing a tuning value.
+All seventeen mutations are caught now; run it after changing a tuning value
+or a comparison.
+
+Two of them came from a different question, worth asking separately: *which
+docstrings explain why something matters, and assert nothing?* Both of this
+module's sync docstrings turned out to be that — the argument for pushing
+before pulling, and the claim that a push dying halfway resumes rather than
+restarts. Reversing the order passed the entire suite. A docstring is where
+the thing you understood too well to test tends to end up.
 
 It clears `__pycache__` between runs, and that is load-bearing: Python keys
 bytecode on mtime-seconds plus size, so flipping a one-character constant back
