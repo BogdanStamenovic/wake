@@ -81,3 +81,37 @@ def test_db_path_expands_a_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("WAKE_DB_PATH", "~/somewhere/wake.db")
     config = load_config(tmp_path / "absent.env")
     assert "~" not in str(config.db_path)
+
+
+# -- pinned defaults --------------------------------------------------------
+# Each of these asserts the property the default exists for as well as its
+# value: a mutation test showed that checking a config value against the
+# constant that produced it passes no matter what that constant becomes.
+
+
+def test_the_server_listens_on_all_interfaces_by_default(tmp_path: Path) -> None:
+    """Loopback here would leave every device unable to reach the server."""
+    config = load_config(tmp_path / "absent.env")
+    assert config.bind == "0.0.0.0"
+    assert config.bind not in ("127.0.0.1", "localhost", "::1")
+
+
+def test_the_default_port_is_8788(tmp_path: Path) -> None:
+    config = load_config(tmp_path / "absent.env")
+    assert config.port == 8788
+    assert 1024 < config.port < 65536, "must be unprivileged and a real port"
+
+
+def test_the_firing_period_is_positive(tmp_path: Path) -> None:
+    """Zero is a busy loop that pegs a core, not a fast scheduler."""
+    config = load_config(tmp_path / "absent.env")
+    assert config.poll_seconds == 5.0
+    assert config.poll_seconds > 0
+
+
+def test_the_sync_period_is_positive_and_slower_than_firing(tmp_path: Path) -> None:
+    """Reconciling is the network-bound half; it must not outpace firing."""
+    config = load_config(tmp_path / "absent.env")
+    assert config.sync_seconds == 60.0
+    assert config.sync_seconds > 0
+    assert config.sync_seconds > config.poll_seconds

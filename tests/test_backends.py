@@ -231,3 +231,11 @@ def test_rtcwake_is_never_dispatched_remotely() -> None:
 def test_an_unknown_backend_is_an_error() -> None:
     with pytest.raises(BackendError, match="unknown backend"):
         fire(make_task(backend="telepathy"), WakeConfig())
+
+
+def test_the_default_broadcast_is_a_broadcast_address() -> None:
+    """Loopback here would send every magic packet nowhere."""
+    from wake import backends
+
+    assert backends.DEFAULT_BROADCAST == "255.255.255.255"
+    assert not backends.DEFAULT_BROADCAST.startswith("127.")

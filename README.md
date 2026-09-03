@@ -274,6 +274,19 @@ already has. Two independent directions:
 .venv/bin/mypy src/wake tests
 ```
 
+`scripts/mutate.sh` is a mutation audit: it flips one constant or comparison
+at a time and reports whether the suite noticed. It exists because a test that
+compares a value against the constant that produced it passes whatever that
+constant becomes — `assert config.port == DEFAULT_PORT` is happy with any
+port. Seven of wake's checks were that shape until it said so, among them the
+default bind address, both loop periods, and the last-write-wins tie-break.
+All fifteen mutations are caught now; run it after changing a tuning value.
+
+It clears `__pycache__` between runs, and that is load-bearing: Python keys
+bytecode on mtime-seconds plus size, so flipping a one-character constant back
+and re-running within the same second can execute the *old* code and report a
+failure against source that is byte-identical to git.
+
 The sync tests run a real `WakeServer` on a loopback port and the backend tests
 open real sockets, rather than stubbing `urllib`. The thing most likely to be
 wrong in this codebase is the wire contract between two halves that were

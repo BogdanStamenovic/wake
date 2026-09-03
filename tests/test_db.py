@@ -341,3 +341,23 @@ def test_cancel_is_never_conditional(db: WakeDB) -> None:
     task = _add(db)
     _add(db, id=task.id, at=9999.0)
     assert db.cancel(task.id).status == "cancelled"
+
+
+def test_a_tied_timestamp_leaves_the_local_row_alone(db: WakeDB) -> None:
+    """The tie-break rule itself, pinned.
+
+    `>=` rather than `>` in merge: an incoming row that is merely *as recent*
+    as the local one has not shown it is newer, and must not overwrite. A
+    re-pushed copy of a row this side already has ties exactly.
+    """
+    local = _add(db)
+    tied = replace(local, task="should not win")
+    assert tied.updated_at == local.updated_at
+    assert db.merge(tied).task == "echo hi"
+    assert db.revision() == 1, "a tie writes nothing at all"
+
+
+def test_a_task_due_at_exactly_now_fires(db: WakeDB) -> None:
+    """The boundary: `at <= now`, not `at < now`."""
+    task = _add(db, at=500.0)
+    assert [t.id for t in db.due(now=500.0)] == [task.id]

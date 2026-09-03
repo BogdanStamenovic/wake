@@ -351,3 +351,26 @@ def test_a_real_subprocess_rearming_the_same_database_is_respected(
     assert stored is not None
     assert stored.status == "pending"
     assert stored.at == 9999.0
+
+
+def test_a_thin_re_add_beats_a_row_stamped_in_the_future(
+    service: WakeService, db: WakeDB
+) -> None:
+    """Why the thin-add branch exists at all, rather than always merging.
+
+    A device whose clock runs fast pushes a row stamped ahead of this
+    machine's wall clock. A later re-add stamps `now`, which is *older* than
+    what is stored -- so routed through merge's last-write-wins it would be
+    discarded, silently, and the caller's timer would sit at the old time
+    reporting success. A re-add is an instruction and is not up for a vote.
+    """
+    from dataclasses import replace
+
+    service.add({"task": "track run abc", "at": 100.0, "id": "track-abc"})
+    stored = db.get("track-abc")
+    assert stored is not None
+    db.merge(replace(stored, updated_at=time.time() + 3600))
+
+    again = service.add({"task": "track run abc", "at": 900.0, "id": "track-abc"})
+    assert again["at"] == 900.0, "the re-arm must not lose to a future timestamp"
+    assert again["status"] == "pending"
