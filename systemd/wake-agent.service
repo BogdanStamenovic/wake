@@ -29,13 +29,24 @@ Restart=on-failure
 RestartSec=10
 TimeoutStopSec=20
 
-# Deliberately NOT NoNewPrivileges=true, unlike wake-server.service. This unit
-# arms the RTC and powers the machine off, both of which go through sudo, and
-# that flag blocks sudo outright: "the no new privileges flag is set, which
-# prevents sudo from running as root". Found by rehearsal, not by reading --
-# a `systemd-run --user` test passed because transient units do not set it, so
-# the check differed from the real unit in exactly the way that mattered.
-PrivateTmp=true
+# This unit is deliberately UNSANDBOXED, unlike wake-server.service. It arms
+# the RTC and powers the machine off, both through sudo, and every sandboxing
+# directive available here breaks sudo in a different way:
+#
+#   NoNewPrivileges=true -> "the no new privileges flag is set, which prevents
+#                           sudo from running as root"
+#   PrivateTmp=true      -> in a *user* manager systemd implements sandboxing
+#                           with an unprivileged user namespace, in which real
+#                           root maps to nobody. sudo then reports
+#                           "/etc/sudo.conf is owned by uid 65534, should be 0"
+#                           and "/usr/bin/sudo must be owned by uid 0 and have
+#                           the setuid bit set". Confirmed by comparing
+#                           /proc/PID/ns/user against a normal shell.
+#
+# Both were found by rehearsal rather than by reading. A `systemd-run --user`
+# check passed for the first one because transient units set neither flag --
+# the test differed from the real unit in exactly the way that mattered.
+# wake-server.service keeps its hardening: it never needs privileges.
 
 [Install]
 WantedBy=default.target
