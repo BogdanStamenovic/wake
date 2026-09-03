@@ -27,6 +27,12 @@ RTC_WAKEALARM = Path("/sys/class/rtc/rtc0/wakealarm")
 # instruction: it is the shape that turns one failed run into a boot loop,
 # waking the machine every few minutes all night.
 MIN_WAKE_LEAD_SECONDS = 600.0
+# How far before a task the RTC is armed. Waking *at* the task's time means it
+# fires on a machine that is still bringing up its network, which is exactly
+# the state a job doing real web work should not start in. The primary path
+# has the same margin by construction: the server's magic packet is scheduled
+# ahead of the task rather than alongside it.
+WAKE_LEAD_SECONDS = 300.0
 AGENT_NAME_FLAG = re.compile(r"--name[= ]+(\S+)")
 
 
@@ -206,6 +212,25 @@ def arm_wakealarm(at: float, *, now: float | None = None) -> None:
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
             raise PowerError(f"could not write {value} to the wakealarm: {detail or 'no output'}")
+
+
+def clear_wakealarm() -> bool:
+    """Disarm the RTC. Called when the machine starts, not when it stops.
+
+    Tomorrow both wake paths are armed at once -- a magic packet from the
+    server and this machine's own alarm -- because either can fail. Whichever
+    fires first, the machine is up and the other is now a leftover: an alarm
+    still set in hardware will power the box on again after the *next*
+    shutdown, at a time nobody chose. Measured here: a WoL wake at 20:44:58
+    left an alarm armed for 20:49:15 with nothing to clear it.
+    """
+    if not RTC_WAKEALARM.exists():
+        return False
+    result = subprocess.run(
+        ["sudo", "-n", "sh", "-c", f"echo 0 > {RTC_WAKEALARM}"],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    return result.returncode == 0
 
 
 def read_wakealarm() -> int | None:

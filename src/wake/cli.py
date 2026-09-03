@@ -22,7 +22,7 @@ from pathlib import Path
 from types import FrameType
 from typing import NoReturn
 
-from . import __version__, backends
+from . import __version__, backends, power
 from .backends import BackendError
 from .config import ConfigError, WakeConfig, load_config
 from .db import WakeDB, WakeError
@@ -254,6 +254,14 @@ def _cmd_agent(args: argparse.Namespace, config: WakeConfig, log: Logger) -> int
             f"wake agent: origin {config.origin}, firing every {config.poll_seconds}s, "
             f"syncing every {config.sync_seconds}s"
         )
+        # The machine is up, so whatever alarm was set to bring it here has
+        # done its job -- and if the other wake path got here first, that alarm
+        # is still armed and would power the box on again after the next
+        # shutdown. Clearing it on start is the only place that reliably runs
+        # after either path wins.
+        previous = power.read_wakealarm()
+        if previous is not None and power.clear_wakealarm():
+            log(f"wake agent: cleared a leftover rtc alarm set for {previous}")
         next_sync = 0.0
         while not stop.is_set():
             if config.server_url and time.monotonic() >= next_sync:

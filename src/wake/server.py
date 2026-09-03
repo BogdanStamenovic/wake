@@ -205,8 +205,9 @@ def finish_power(db: WakeDB, config: WakeConfig, task: Task, *, succeeded: bool)
         if upcoming:
             nxt = min(upcoming, key=lambda t: t.at)
             try:
-                power.arm_wakealarm(nxt.at)
-                armed = f"rtc armed for {nxt.id[:8]} at {nxt.at:.0f}"
+                wake_at = nxt.at - power.WAKE_LEAD_SECONDS
+                power.arm_wakealarm(wake_at)
+                armed = f"rtc armed for {nxt.id[:8]} at {wake_at:.0f} (task at {nxt.at:.0f})"
             except power.PowerError as exc:
                 armed = f"rtc NOT armed: {exc}"
                 LOG.error("could not arm the rtc: %s", exc)
