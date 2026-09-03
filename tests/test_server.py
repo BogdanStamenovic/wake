@@ -260,3 +260,94 @@ def test_an_external_re_add_rearms_the_same_id(service: WakeService, db: WakeDB)
     assert again["at"] == 900.0
     assert again["status"] == "pending"
     assert len(db.tasks(include_all=True)) == 1
+
+
+# -- the self-re-arming task ------------------------------------------------
+
+
+def test_a_task_that_rearms_itself_stays_scheduled(
+    db: WakeDB, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The command reschedules its own id before returning; wake must not
+    stamp `fired` over the `pending` it just wrote."""
+    from wake import backends
+
+    def rearming(task: Any, config: Any) -> None:
+        db.add(
+            task=task.task, at=9999.0, backend="shell", target=None,
+            origin=task.origin, id=task.id,
+        )
+
+    monkeypatch.setitem(backends.FIRE_BACKENDS, "shell", rearming)
+    db.add(task="track run abc", at=1.0, backend="shell", target=None, origin="server")
+
+    run_once(db, WakeConfig(), now=500.0)
+    stored = db.get(db.tasks(include_all=True)[0].id)
+    assert stored is not None
+    assert stored.status == "pending", "the assignment must survive its own run"
+    assert stored.at == 9999.0
+    assert stored.fired_at is None
+
+
+def test_a_task_that_rearms_a_different_id_is_still_marked_fired(
+    db: WakeDB, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only self-re-arming hits the race; normal firing must be unaffected."""
+    from wake import backends
+
+    def schedules_another(task: Any, config: Any) -> None:
+        db.add(task="next", at=9999.0, backend="shell", target=None, origin="server")
+
+    monkeypatch.setitem(backends.FIRE_BACKENDS, "shell", schedules_another)
+    original = db.add(
+        task="x", at=1.0, backend="shell", target=None, origin="server", id="first"
+    )
+
+    run_once(db, WakeConfig(), now=500.0)
+    stored = db.get(original.id)
+    assert stored is not None
+    assert stored.status == "fired"
+
+
+def test_a_real_subprocess_rearming_the_same_database_is_respected(
+    db: WakeDB, tmp_path: Path
+) -> None:
+    """The race for real: a separate process writes the row mid-fire.
+
+    Uses the shell backend and a genuine child process rather than a patched
+    callable, because the thing being trusted here is that the parent's
+    connection sees the child's commit through WAL at all -- an in-process
+    fake would prove nothing about that.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    script = tmp_path / "rearm.py"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+            from wake.db import WakeDB
+            with WakeDB({str(db.path)!r}) as handle:
+                handle.add(
+                    task="next occurrence", at=9999.0, backend="shell",
+                    target=None, origin="server", id="recurring",
+                )
+            """
+        )
+    )
+    db.add(
+        task=f"{sys.executable} {script}", at=1.0, backend="shell",
+        target=None, origin="server", id="recurring",
+    )
+
+    proof = subprocess.run(
+        [sys.executable, "-c", "import wake"], capture_output=True, check=False
+    )
+    assert proof.returncode == 0, "the child needs wake importable"
+
+    run_once(db, WakeConfig(), now=500.0)
+    stored = db.get("recurring")
+    assert stored is not None
+    assert stored.status == "pending"
+    assert stored.at == 9999.0

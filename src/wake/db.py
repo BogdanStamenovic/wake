@@ -251,12 +251,25 @@ class WakeDB:
             return stored
 
     def _update_status(
-        self, id: str, *, status: str, fired_at: float | None = None, error: str | None = None
-    ) -> Task:
+        self,
+        id: str,
+        *,
+        status: str,
+        fired_at: float | None = None,
+        error: str | None = None,
+        expect_rev: int | None = None,
+    ) -> Task | None:
+        """Set a task's status. With ``expect_rev``, only if it has not moved.
+
+        Returns ``None`` when the row was written by someone else since
+        ``expect_rev`` was read -- see ``mark_fired``.
+        """
         with self._lock:
             existing = self.get(id)
             if existing is None:
                 raise WakeError(f"no such task: {id}")
+            if expect_rev is not None and existing.rev != expect_rev:
+                return None
             rev = self._next_rev()
             now = time.time()
             self._conn.execute(
@@ -269,16 +282,46 @@ class WakeDB:
             return updated
 
     def cancel(self, id: str) -> Task:
-        return self._update_status(id, status="cancelled")
+        """Cancel unconditionally: this is the operator's instruction, it wins."""
+        cancelled = self._update_status(id, status="cancelled")
+        assert cancelled is not None
+        return cancelled
 
     def mark_armed(self, id: str) -> Task:
-        return self._update_status(id, status="armed")
+        armed = self._update_status(id, status="armed")
+        assert armed is not None
+        return armed
 
-    def mark_fired(self, id: str) -> Task:
-        return self._update_status(id, status="fired", fired_at=time.time())
+    def mark_fired(self, id: str, *, expect_rev: int | None = None) -> Task | None:
+        """Record that a task fired, unless it was re-armed while it ran.
 
-    def mark_failed(self, id: str, error: str) -> Task:
-        return self._update_status(id, status="failed", error=error)
+        ``expect_rev`` closes a race that only a *self*-re-arming task can hit,
+        and it is the exact caller an explicit ``--id`` was built for. A
+        recurring job's command is something like `track run abc`, which
+        schedules the next occurrence of its own id before it exits. wake is
+        still holding that task open: the command returns, and this write then
+        stamps `fired` over the `pending` the re-arm just wrote. Only status
+        and fired_at are touched, so `at` survives with the correct future
+        time -- the row looks healthy and is dead, and nothing is logged.
+
+        So the post-run bookkeeping is compare-and-set on the revision read
+        before the command started, and gives way if the row moved. "This task
+        fired" must not overwrite a later "this task is armed again", for the
+        same reason ``rearm`` does not go through ``merge``: a re-arm is an
+        instruction and must not be discarded, including by this path.
+        """
+        return self._update_status(
+            id, status="fired", fired_at=time.time(), expect_rev=expect_rev
+        )
+
+    def mark_failed(self, id: str, error: str, *, expect_rev: int | None = None) -> Task | None:
+        """Record a failure, unless the task was re-armed while it ran.
+
+        Same compare-and-set as ``mark_fired``: a job that fails *and* still
+        schedules its next run has said something newer than this. Callers log
+        the error either way -- only the stored status is conditional.
+        """
+        return self._update_status(id, status="failed", error=error, expect_rev=expect_rev)
 
     def mark_pushed(self, id: str, rev: int) -> None:
         """Record that the server has seen this row as of local revision ``rev``.

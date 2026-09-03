@@ -284,3 +284,60 @@ def test_rearming_a_missing_id_raises(db: WakeDB) -> None:
         db.rearm(
             "nope", task="x", at=1.0, backend="shell", target=None, origin="testbox"
         )
+
+
+# -- compare-and-set on the fire path ---------------------------------------
+# A task whose command re-arms its own id rewrites the row while wake is still
+# holding it. The post-run bookkeeping must give way, not stamp over it.
+
+
+def test_mark_fired_writes_when_the_row_has_not_moved(db: WakeDB) -> None:
+    task = _add(db)
+    fired = db.mark_fired(task.id, expect_rev=task.rev)
+    assert fired is not None
+    assert fired.status == "fired"
+
+
+def test_mark_fired_gives_way_when_the_row_moved(db: WakeDB) -> None:
+    task = _add(db)
+    _add(db, id=task.id, at=9999.0)  # a re-arm, as the running command would do
+    assert db.mark_fired(task.id, expect_rev=task.rev) is None
+
+    still = db.get(task.id)
+    assert still is not None
+    assert still.status == "pending", "the re-arm must survive"
+    assert still.at == 9999.0
+    assert still.fired_at is None
+
+
+def test_a_skipped_stamp_burns_no_revision(db: WakeDB) -> None:
+    task = _add(db)
+    _add(db, id=task.id, at=9999.0)
+    before = db.revision()
+    db.mark_fired(task.id, expect_rev=task.rev)
+    assert db.revision() == before
+
+
+def test_mark_failed_gives_way_when_the_row_moved(db: WakeDB) -> None:
+    task = _add(db)
+    _add(db, id=task.id, at=9999.0)
+    assert db.mark_failed(task.id, "boom", expect_rev=task.rev) is None
+
+    still = db.get(task.id)
+    assert still is not None
+    assert still.status == "pending"
+    assert still.error is None
+
+
+def test_without_expect_rev_the_stamp_is_unconditional(db: WakeDB) -> None:
+    """The scheduler opts in; nothing else has a revision to compare against."""
+    task = _add(db)
+    _add(db, id=task.id, at=9999.0)
+    assert db.mark_fired(task.id) is not None
+
+
+def test_cancel_is_never_conditional(db: WakeDB) -> None:
+    """An operator cancelling beats whatever the task just did to itself."""
+    task = _add(db)
+    _add(db, id=task.id, at=9999.0)
+    assert db.cancel(task.id).status == "cancelled"

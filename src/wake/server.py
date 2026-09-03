@@ -142,14 +142,26 @@ def run_once(
     """
     handled = []
     for task in db.due(owner, now=now):
+        # Captured before the command runs: a self-re-arming task rewrites this
+        # row while we are still holding it, and the bookkeeping below must
+        # give way rather than stamp `fired` over the new `pending`.
+        before = task.rev
         try:
             backends.fire(task, config)
         except backends.BackendError as exc:
             LOG.error("task %s (%s) failed: %s", task.id, task.backend, exc)
-            db.mark_failed(task.id, str(exc))
+            if db.mark_failed(task.id, str(exc), expect_rev=before) is None:
+                LOG.warning(
+                    "task %s re-armed itself while failing; leaving it scheduled", task.id
+                )
         else:
-            LOG.info("task %s (%s) fired", task.id, task.backend)
-            db.mark_fired(task.id)
+            if db.mark_fired(task.id, expect_rev=before) is None:
+                LOG.info(
+                    "task %s (%s) fired and re-armed itself; leaving it scheduled",
+                    task.id, task.backend,
+                )
+            else:
+                LOG.info("task %s (%s) fired", task.id, task.backend)
         handled.append(task)
     return handled
 

@@ -231,3 +231,39 @@ def test_rearming_a_fired_task_puts_it_back_in_the_queue(
     main(["list", "--json"])
     rows = json.loads(capsys.readouterr().out)
     assert [r["status"] for r in rows] == ["pending"]
+
+
+def test_firing_a_self_rearming_task_leaves_it_scheduled(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`wake fire` on a recurring task must not kill it. Exercised through a
+    real child process, which is what actually re-arms in production."""
+    import sys
+    import textwrap
+
+    db_path = str(tmp_path / "wake.db")
+    script = tmp_path / "rearm.py"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+            from wake.db import WakeDB
+            with WakeDB({db_path!r}) as handle:
+                handle.add(
+                    task="next", at=9999999999.0, backend="shell",
+                    target=None, origin="testbox", id="recurring",
+                )
+            """
+        )
+    )
+    main([
+        "add", "--at", "+1h", "--id", "recurring",
+        "--task", f"{sys.executable} {script}",
+    ])
+    capsys.readouterr()
+
+    assert main(["fire", "recurring"]) == 0
+    assert "re-armed itself" in capsys.readouterr().err
+
+    main(["list", "--json"])
+    rows = json.loads(capsys.readouterr().out)
+    assert [r["status"] for r in rows] == ["pending"], "the timer must survive"

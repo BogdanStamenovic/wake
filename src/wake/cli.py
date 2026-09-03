@@ -302,14 +302,18 @@ def _cmd_fire(args: argparse.Namespace, config: WakeConfig, log: Logger) -> int:
             db.mark_armed(task.id)
             log(f"armed rtcwake for {task.id}")
             return 0
+        before = task.rev
         try:
             backends.fire(task, config)
         except BackendError as exc:
-            db.mark_failed(task.id, str(exc))
+            if db.mark_failed(task.id, str(exc), expect_rev=before) is None:
+                log(f"wake: {task.id} re-armed itself while failing; leaving it scheduled")
             print(f"wake: error: {exc}", file=sys.stderr)
             return 1
-        db.mark_fired(task.id)
-    log(f"fired {task.id}")
+        if db.mark_fired(task.id, expect_rev=before) is None:
+            log(f"fired {task.id}; it re-armed itself, leaving it scheduled")
+        else:
+            log(f"fired {task.id}")
     _autosync(config, log)
     return 0
 

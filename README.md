@@ -173,6 +173,17 @@ The same rule applies over HTTP, keyed on whether the body carries
 `updated_at`: a sync push sends a full task and so has one, and merges; a thin
 `{task, at, id}` from a Shortcut or a bot has none, and re-arms.
 
+A task whose own command re-arms it — the normal shape for a recurring job,
+whose command is something like `track run abc` — gets one more guarantee. The
+command rewrites the row while wake is still holding it open, so wake's
+post-run bookkeeping is a compare-and-set against the revision it read before
+starting the command, and gives way if the row moved. Without that, `fired`
+lands over the `pending` the re-arm just wrote: only `status` and `fired_at`
+are touched, so the task keeps its correct future `at` and looks perfectly
+healthy while never firing again. The log says `re-armed itself; leaving it
+scheduled` when this happens. `wake cancel` is never conditional — an
+operator cancelling beats whatever the task just did to itself.
+
 ### How sync works
 
 Every write bumps a monotonic revision counter and stamps the row with it, so
