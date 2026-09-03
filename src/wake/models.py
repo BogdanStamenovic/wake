@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 BACKENDS = ("shell", "wol", "rtcwake", "notify", "call")
+THEN_ACTIONS = ("", "poweroff")
 STATUSES = ("pending", "armed", "fired", "failed", "cancelled")
 
 
@@ -32,6 +33,8 @@ class Task:
     updated_at: float
     rev: int
     owner: str = ""
+    then_do: str = ""  # "" or "poweroff": what to do to the machine afterwards
+    timeout_seconds: float | None = None  # per-task override for the shell timeout
     fired_at: float | None = None
     error: str | None = None
 
@@ -48,6 +51,8 @@ class Task:
             "updated_at": self.updated_at,
             "rev": self.rev,
             "owner": self.owner,
+            "then_do": self.then_do,
+            "timeout_seconds": self.timeout_seconds,
             "fired_at": self.fired_at,
             "error": self.error,
         }
@@ -72,6 +77,12 @@ class Task:
             updated_at=_as_float(data["updated_at"]),
             rev=int(_as_float(data["rev"])),
             owner=str(data.get("owner") or ""),
+            then_do=str(data.get("then_do") or ""),
+            timeout_seconds=(
+                _as_float(data["timeout_seconds"])
+                if data.get("timeout_seconds") is not None
+                else None
+            ),
             fired_at=_as_float(data["fired_at"]) if data.get("fired_at") is not None else None,
             error=str(data["error"]) if data.get("error") is not None else None,
         )

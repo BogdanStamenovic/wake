@@ -33,16 +33,20 @@ class BackendError(Exception):
 
 
 def fire_shell(task: Task, config: WakeConfig) -> None:
+    # A per-task timeout, because the default is sized for a quick command and
+    # the jobs worth waking a machine for are not quick. It is a hard ceiling
+    # either way: a hung task must not be able to hold the machine up forever.
+    limit = task.timeout_seconds or SHELL_TIMEOUT
     try:
         result = subprocess.run(
             ["sh", "-c", task.task],
             capture_output=True,
             text=True,
-            timeout=SHELL_TIMEOUT,
+            timeout=limit,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise BackendError(f"command did not finish within {SHELL_TIMEOUT:.0f}s") from exc
+        raise BackendError(f"command did not finish within {limit:.0f}s") from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise BackendError(f"command exited {result.returncode}: {detail or 'no output'}")

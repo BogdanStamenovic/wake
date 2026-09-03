@@ -27,7 +27,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Self
 
-from .models import BACKENDS, STATUSES, Task
+from .models import BACKENDS, STATUSES, THEN_ACTIONS, Task
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at REAL NOT NULL,
     rev INTEGER NOT NULL,
     owner TEXT NOT NULL DEFAULT '',
+    then_do TEXT NOT NULL DEFAULT '',
+    timeout_seconds REAL,
     pushed_rev INTEGER NOT NULL DEFAULT 0,
     fired_at REAL,
     error TEXT
@@ -61,6 +63,8 @@ CREATE TABLE IF NOT EXISTS meta (
 _MIGRATIONS = {
     "owner": "ALTER TABLE tasks ADD COLUMN owner TEXT NOT NULL DEFAULT ''",
     "pushed_rev": "ALTER TABLE tasks ADD COLUMN pushed_rev INTEGER NOT NULL DEFAULT 0",
+    "then_do": "ALTER TABLE tasks ADD COLUMN then_do TEXT NOT NULL DEFAULT ''",
+    "timeout_seconds": "ALTER TABLE tasks ADD COLUMN timeout_seconds REAL",
 }
 
 
@@ -124,6 +128,8 @@ class WakeDB:
         target: str | None,
         origin: str,
         owner: str = "",
+        then_do: str = "",
+        timeout_seconds: float | None = None,
         id: str | None = None,
         status: str = "pending",
     ) -> Task:
@@ -138,11 +144,14 @@ class WakeDB:
             raise WakeError(f"unknown backend {backend!r}, expected one of {BACKENDS}")
         if status not in STATUSES:
             raise WakeError(f"unknown status {status!r}, expected one of {STATUSES}")
+        if then_do not in THEN_ACTIONS:
+            raise WakeError(f"unknown --then action {then_do!r}, expected one of {THEN_ACTIONS}")
         with self._lock:
             if id is not None and self.get(id) is not None:
                 return self.rearm(
                     id, task=task, at=at, backend=backend, target=target,
                     origin=origin, owner=owner, status=status,
+                    then_do=then_do, timeout_seconds=timeout_seconds,
                 )
             now = time.time()
             row = Task(
@@ -157,11 +166,14 @@ class WakeDB:
                 updated_at=now,
                 rev=self._next_rev(),
                 owner=owner,
+                then_do=then_do,
+                timeout_seconds=timeout_seconds,
             )
             self._conn.execute(
                 "INSERT INTO tasks "
                 "(id, task, at, backend, target, status, origin, created_at, updated_at, rev, "
-                " owner, pushed_rev, fired_at, error) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " owner, then_do, timeout_seconds, pushed_rev, fired_at, error) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (*_columns(row), 0, row.fired_at, row.error),
             )
             self._conn.commit()
@@ -177,6 +189,8 @@ class WakeDB:
         target: str | None,
         origin: str,
         owner: str = "",
+        then_do: str = "",
+        timeout_seconds: float | None = None,
         status: str = "pending",
     ) -> Task:
         """Point an existing task at a new time, unconditionally.
@@ -202,8 +216,10 @@ class WakeDB:
             rev = self._next_rev()
             self._conn.execute(
                 "UPDATE tasks SET task=?, at=?, backend=?, target=?, status=?, origin=?, "
-                "owner=?, updated_at=?, rev=?, fired_at=NULL, error=NULL WHERE id=?",
-                (task, at, backend, target, status, origin, owner, now, rev, id),
+                "owner=?, then_do=?, timeout_seconds=?, updated_at=?, rev=?, "
+                "fired_at=NULL, error=NULL WHERE id=?",
+                (task, at, backend, target, status, origin, owner, then_do,
+                 timeout_seconds, now, rev, id),
             )
             self._conn.commit()
             updated = self.get(id)
@@ -237,11 +253,13 @@ class WakeDB:
             self._conn.execute(
                 "INSERT INTO tasks "
                 "(id, task, at, backend, target, status, origin, created_at, updated_at, rev, "
-                " owner, pushed_rev, fired_at, error) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                " owner, then_do, timeout_seconds, pushed_rev, fired_at, error) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "task=excluded.task, at=excluded.at, backend=excluded.backend, "
                 "target=excluded.target, status=excluded.status, updated_at=excluded.updated_at, "
-                "rev=excluded.rev, owner=excluded.owner, pushed_rev=excluded.pushed_rev, "
+                "rev=excluded.rev, owner=excluded.owner, then_do=excluded.then_do, "
+                "timeout_seconds=excluded.timeout_seconds, pushed_rev=excluded.pushed_rev, "
                 "fired_at=excluded.fired_at, error=excluded.error",
                 (*_columns(merged), rev, merged.fired_at, merged.error),
             )
@@ -413,7 +431,7 @@ class WakeDB:
 
 
 def _columns(row: Task) -> tuple[object, ...]:
-    """The first eleven INSERT parameters, in schema order."""
+    """The first thirteen INSERT parameters, in schema order."""
     return (
         row.id,
         row.task,
@@ -426,6 +444,8 @@ def _columns(row: Task) -> tuple[object, ...]:
         row.updated_at,
         row.rev,
         row.owner,
+        row.then_do,
+        row.timeout_seconds,
     )
 
 
@@ -442,6 +462,8 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         updated_at=row["updated_at"],
         rev=row["rev"],
         owner=row["owner"],
+        then_do=row["then_do"],
+        timeout_seconds=row["timeout_seconds"],
         fired_at=row["fired_at"],
         error=row["error"],
     )

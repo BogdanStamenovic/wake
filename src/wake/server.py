@@ -16,7 +16,7 @@ from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from . import backends
+from . import backends, power
 from .config import WakeConfig
 from .db import WakeDB
 from .models import Task
@@ -154,6 +154,8 @@ def run_once(
                 LOG.warning(
                     "task %s re-armed itself while failing; leaving it scheduled", task.id
                 )
+            if task.then_do:
+                LOG.info("task %s: %s", task.id, finish_power(db, config, task, succeeded=False))
         else:
             if db.mark_fired(task.id, expect_rev=before) is None:
                 LOG.info(
@@ -162,8 +164,59 @@ def run_once(
                 )
             else:
                 LOG.info("task %s (%s) fired", task.id, task.backend)
+            if task.then_do:
+                LOG.info("task %s: %s", task.id, finish_power(db, config, task, succeeded=True))
         handled.append(task)
     return handled
+
+
+def finish_power(db: WakeDB, config: WakeConfig, task: Task, *, succeeded: bool) -> str:
+    """Carry out a task's ``--then`` action. Returns what happened, for the log.
+
+    Order matters and each step is a guard in its own right:
+
+    1. Refuse if someone is using the machine or other work is in flight.
+    2. Arm the RTC for the next task this machine owns, *before* going down --
+       that alarm is the backup path, the one that still works when the wake
+       server or the LAN does not.
+    3. Stop the timer that respawns the operator, so a session cannot appear
+       between the check and the poweroff with nothing left to notice it.
+    4. Power off.
+
+    A failed task still powers the machine off: it finished, and leaving a
+    desktop running all day because a research job exited non-zero is the
+    wrong failure. What a failure does *not* do is arm the next wake -- that
+    is the difference between a bad run and a machine waking every ten minutes
+    all night to fail again.
+    """
+    if task.then_do != "poweroff":
+        return "nothing to do"
+
+    seen = power.presence(
+        allow_agents={n for n in config.poweroff_allow_agents.split(",") if n.strip()},
+        allow_match=config.poweroff_allow_match,
+    )
+    if not seen.clear:
+        return f"staying up: {seen.why()}"
+
+    armed = "no next task to arm"
+    if succeeded:
+        upcoming = [t for t in db.tasks() if t.at > time.time() and t.owner == config.origin]
+        if upcoming:
+            nxt = min(upcoming, key=lambda t: t.at)
+            try:
+                power.arm_wakealarm(nxt.at)
+                armed = f"rtc armed for {nxt.id[:8]} at {nxt.at:.0f}"
+            except power.PowerError as exc:
+                armed = f"rtc NOT armed: {exc}"
+                LOG.error("could not arm the rtc: %s", exc)
+    else:
+        armed = "rtc not armed: the task failed, and a failing wake loop is worse than a dark box"
+
+    stopped = power.suppress_watchdog()
+    LOG.warning("powering off (%s; watchdog suppressed: %s)", armed, stopped)
+    power.power_off()
+    return f"powering off ({armed})"
 
 
 def _make_handler(service: WakeService) -> type[BaseHTTPRequestHandler]:

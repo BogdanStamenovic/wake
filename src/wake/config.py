@@ -8,6 +8,7 @@ config on this box.
 from __future__ import annotations
 
 import os
+import re
 import socket
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,8 @@ class WakeConfig:
     port: int = DEFAULT_PORT
     poll_seconds: float = 5.0
     sync_seconds: float = 60.0  # how often `wake agent` reconciles with the server
+    poweroff_allow_agents: str = ""  # agent --name values that never block a poweroff
+    poweroff_allow_match: str = ""  # regex; agent command lines matching it are furniture
     wol_broadcast: str = ""  # override the 255.255.255.255 default for the wol backend
     hotline_ios_url: str = ""  # e.g. http://100.72.2.62:8789, used by the notify backend
     hotline_ios_key: str = ""
@@ -101,6 +104,14 @@ def load_config(path: Path | None = None) -> WakeConfig:
             raise ConfigError(
                 f"SYNC_SECONDS must be numeric, not {values['SYNC_SECONDS']!r}"
             ) from exc
+    if "POWEROFF_ALLOW_AGENTS" in values:
+        config.poweroff_allow_agents = values["POWEROFF_ALLOW_AGENTS"]
+    if "POWEROFF_ALLOW_MATCH" in values:
+        try:
+            re.compile(values["POWEROFF_ALLOW_MATCH"])
+        except re.error as exc:
+            raise ConfigError(f"POWEROFF_ALLOW_MATCH is not a valid regex: {exc}") from exc
+        config.poweroff_allow_match = values["POWEROFF_ALLOW_MATCH"]
     if "WOL_BROADCAST" in values:
         config.wol_broadcast = values["WOL_BROADCAST"]
     if "HOTLINE_IOS_URL" in values:

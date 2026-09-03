@@ -27,7 +27,7 @@ from .backends import BackendError
 from .config import ConfigError, WakeConfig, load_config
 from .db import WakeDB, WakeError
 from .models import BACKENDS, Task
-from .server import WakeServer, run_once
+from .server import WakeServer, finish_power, run_once
 from .syncclient import SyncError
 from .syncclient import sync as sync_now
 from .whenspec import WhenError, parse_when
@@ -60,6 +60,15 @@ def _build_parser() -> argparse.ArgumentParser:
     add.add_argument("--target", help="backend-specific target (MAC for wol, agent for notify)")
     add.add_argument("--on", dest="owner", help="origin name of the machine that fires it "
                                                 "(default: the server)")
+    add.add_argument(
+        "--then", dest="then_do", default="", choices=("poweroff",),
+        help="what to do to this machine once the task finishes",
+    )
+    add.add_argument(
+        "--timeout", type=float,
+        help="seconds before the command is killed (default 300); a hung task must "
+             "not be able to hold the machine up forever",
+    )
     add.add_argument("--id", help="explicit task id, instead of a generated one")
 
     listing = sub.add_parser("list", help="list wake tasks")
@@ -191,6 +200,7 @@ def _cmd_add(args: argparse.Namespace, config: WakeConfig, vlog: Logger) -> int:
         task = db.add(
             task=args.task, at=at, backend=args.backend, target=args.target,
             origin=config.origin, owner=args.owner or "", id=args.id,
+            then_do=args.then_do, timeout_seconds=args.timeout,
         )
         if args.backend == "rtcwake":
             # Armed here and now, on this machine: nothing else can reach a
@@ -314,6 +324,11 @@ def _cmd_fire(args: argparse.Namespace, config: WakeConfig, log: Logger) -> int:
             log(f"fired {task.id}; it re-armed itself, leaving it scheduled")
         else:
             log(f"fired {task.id}")
+        if task.then_do:
+            # Deliberately the same call the scheduler makes. A manual
+            # `wake fire` that skipped the power sequence would prove nothing
+            # about the unattended run it is meant to rehearse.
+            log(f"wake: {finish_power(db, config, task, succeeded=True)}")
     _autosync(config, log)
     return 0
 
