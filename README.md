@@ -45,7 +45,16 @@ deploy/install.sh --role device --unit none  # no unit; run it by hand
 It enables but does not start, so there is a moment to fill in the config
 first. Re-running is safe and never overwrites an existing config file.
 `deploy/uninstall.sh` reverses it, keeping the database and config unless
-given `--purge`.
+given `--purge`. It also runs `systemctl --user reset-failed` and clears any
+timer stamp files, because neither is removed by disabling and deleting a
+unit — a unit that had failed keeps a `not-found failed` runtime entry, and a
+stamp file outlives its timer entirely.
+
+`wake-sync.timer` is the alternative to `wake-agent.service` for a laptop:
+each run is a fresh short-lived process, so nothing holds a socket or a
+database handle across a suspend and there is no daemon to wedge. It only
+syncs — a device that must also fire its own tasks on time wants the agent,
+since a two-minute timer cannot honour an alarm to the second.
 
 ## Usage
 

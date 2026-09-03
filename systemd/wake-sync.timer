@@ -1,13 +1,24 @@
 # The laptop alternative to wake-agent.service.
 #
-# Persistent=true is the reason to prefer it there: after a suspend or a
-# shutdown the timer fires once on resume to catch up, where a daemon would
-# have been frozen mid-sleep and a plain interval timer would silently have
-# skipped every window it was suspended through.
+# Prefer it there because each run is a fresh short-lived process: nothing
+# holds a socket or a database handle across a suspend, and there is no daemon
+# that can wedge in a way only a restart clears. It only syncs, though -- a
+# device that must also *fire* its own tasks on time wants wake-agent.service,
+# since a timer running every two minutes cannot honour an alarm to the second.
 #
-# It only syncs. A device that must also *fire* its own tasks on time wants
-# wake-agent.service; a timer that runs every two minutes cannot honour an
-# alarm to the second.
+# There is deliberately no Persistent=true here, and that is not an oversight.
+# It looks like it would make a laptop catch up on syncs missed while it was
+# asleep, and every signal agrees: systemd accepts it and `systemctl show`
+# reports Persistent=yes. But systemd.timer(5) is explicit that it "only has an
+# effect on timers configured with OnCalendar=", and these triggers are
+# monotonic. Verified on this box -- with the line, systemd writes a stamp
+# under ~/.local/share/systemd/timers and never removes it, not even when the
+# unit is disabled and deleted; without it, no stamp and identical behaviour.
+# It bought nothing and leaked a file per install.
+#
+# What actually covers the gaps: OnBootSec= after a cold start, and monotonic
+# time not advancing across a suspend, so a resumed laptop syncs within
+# OnUnitActiveSec= of waking rather than skipping the windows it slept through.
 #
 #   install -Dm644 systemd/wake-sync.{service,timer} ~/.config/systemd/user/
 #   systemctl --user daemon-reload && systemctl --user enable --now wake-sync.timer
@@ -19,7 +30,6 @@ Documentation=https://github.com/BogdanStamenovic/wake
 [Timer]
 OnBootSec=1min
 OnUnitActiveSec=2min
-Persistent=true
 AccuracySec=15s
 
 [Install]

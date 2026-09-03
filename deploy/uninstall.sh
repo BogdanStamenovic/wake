@@ -31,6 +31,15 @@ for unit in "${UNITS[@]}"; do
   systemctl --user reset-failed "${unit}" 2>/dev/null || true
 done
 
+# Nor does removing a timer remove its stamp file. Current units set no
+# Persistent=, so they write none -- but a wake installed before that change
+# armed wake-sync.timer with it and left one behind, and systemd keeps that
+# file after the unit is disabled, deleted and reset. Verified on this box.
+STAMP_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/systemd/timers"
+for unit in "${UNITS[@]}"; do
+  rm -f "${STAMP_DIR}/stamp-${unit}"
+done
+
 # Refuse to rm anything that resolved to a surprise. The variables are built
 # from $HOME, and an empty $HOME would otherwise aim this at /.
 for path in "${STATE_DIR}" "${CONFIG_DIR}"; do
