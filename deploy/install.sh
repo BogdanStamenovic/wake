@@ -261,11 +261,21 @@ render_unit() {  # render_unit <source> <destination>
 # the other one. That is how you move a live agent, and its scheduled power
 # tasks, onto a checkout nobody meant to deploy. Installing over another
 # checkout's unit therefore has to be asked for.
+# systemd expands %h itself, so a unit written by an older install.sh says
+# "ExecStart=%h/data/wake/..." and a literal string compare calls it foreign.
+# Expand it the same way the user manager does before deciding.
+unit_exec_root() {  # unit_exec_root <unit file>; prints the ExecStart binary path
+  [[ -f $1 ]] || return 1
+  local line
+  line="$(sed -n 's/^ExecStart=//p' "$1" | head -n1)"
+  [[ -n ${line} ]] || return 1
+  printf '%s' "${line//%h/${HOME}}"
+}
+
 foreign_unit() {  # foreign_unit <unit filename>
-  local file="${UNIT_DIR}/$1"
-  [[ -f ${file} ]] || return 1
-  grep -q '^ExecStart=' "${file}" || return 1
-  ! grep -qF "ExecStart=${REPOSITORY}/" "${file}"
+  local exec_path
+  exec_path="$(unit_exec_root "${UNIT_DIR}/$1")" || return 1
+  [[ ${exec_path} != "${REPOSITORY}/"* ]]
 }
 
 case "${UNIT}" in
@@ -277,7 +287,7 @@ if [[ ${UNIT} != "none" && ${TAKEOVER} -ne 1 ]]; then
   for candidate in "wake-${UNIT}.service" wake-sync.service; do
     if foreign_unit "${candidate}"; then
       echo "${UNIT_DIR}/${candidate} already exists and runs a different checkout:"
-      sed -n 's/^ExecStart=/  /p' "${UNIT_DIR}/${candidate}"
+      echo "  $(unit_exec_root "${UNIT_DIR}/${candidate}")"
       echo "Not touching it. This install stops at the venv and the config."
       echo "  --takeover (or WAKE_INSTALL_TAKEOVER=1) repoints it at ${REPOSITORY}."
       echo "  --unit none installs no unit at all and silences this."

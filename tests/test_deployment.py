@@ -97,7 +97,7 @@ def test_server_url_normalisation(given: str, expected: str) -> None:
 def test_uninstall_only_touches_its_own_units() -> None:
     """Two checkouts share one systemd user namespace; ownership is ExecStart."""
     text = UNINSTALL.read_text()
-    assert 'grep -qF "ExecStart=${REPOSITORY}/"' in text
+    assert '[[ ${exec_path} == "${REPOSITORY}/"* ]]' in text
     assert "--all" in text
 
 
@@ -118,3 +118,21 @@ def test_install_checks_systemd_resolves_the_file_it_wrote() -> None:
     text = INSTALL.read_text()
     assert "-p FragmentPath" in text
     assert 'if [[ ${fragment} != "${UNIT_DIR}/${unit}" ]]' in text
+
+
+@pytest.mark.parametrize("script", [INSTALL, UNINSTALL])
+def test_unit_ownership_expands_the_home_specifier(script: Path, tmp_path: Path) -> None:
+    """A unit written before @WAKE_ROOT@ says %h; systemd expands it, so must we."""
+    unit = tmp_path / "wake-agent.service"
+    unit.write_text("[Service]\nExecStart=%h/data/wake/.venv/bin/wake agent\n")
+    body = (
+        f"source <(sed -n '/^unit_exec_root/,/^}}/p' {script}); unit_exec_root {unit}"
+    )
+    result = subprocess.run(
+        ["bash", "-c", body],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={"HOME": "/home/someone", "PATH": "/usr/bin:/bin"},
+    )
+    assert result.stdout == "/home/someone/data/wake/.venv/bin/wake agent"

@@ -43,6 +43,17 @@ UNITS=(wake-server.service wake-agent.service wake-sync.timer wake-sync.service)
 # service, which is how you lose a scheduled poweroff by tidying up a checkout.
 # Ownership is read off ExecStart, which install.sh renders with an absolute
 # path into the repository it installed from.
+# systemd expands %h itself, so a unit written by an older install.sh says
+# "ExecStart=%h/data/wake/..." and a literal string compare calls it foreign.
+# Expand it the same way the user manager does before deciding.
+unit_exec_root() {  # unit_exec_root <unit file>; prints the ExecStart binary path
+  [[ -f $1 ]] || return 1
+  local line
+  line="$(sed -n 's/^ExecStart=//p' "$1" | head -n1)"
+  [[ -n ${line} ]] || return 1
+  printf '%s' "${line//%h/${HOME}}"
+}
+
 owns_unit() {  # owns_unit <unit filename>
   local file="${UNIT_DIR}/$1"
   [[ -f ${file} ]] || return 1
@@ -50,8 +61,9 @@ owns_unit() {  # owns_unit <unit filename>
   # The timer has no ExecStart of its own; it belongs to whoever owns the
   # service it triggers.
   [[ $1 == "wake-sync.timer" ]] && file="${UNIT_DIR}/wake-sync.service"
-  [[ -f ${file} ]] || return 1
-  grep -qF "ExecStart=${REPOSITORY}/" "${file}"
+  local exec_path
+  exec_path="$(unit_exec_root "${file}")" || return 1
+  [[ ${exec_path} == "${REPOSITORY}/"* ]]
 }
 
 REMOVED=()
