@@ -10,7 +10,10 @@
 # Restores from git after every mutation, so the tree must be clean first.
 # Usage: scripts/mutate.sh
 set -uo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# No `set -e` here, so an unchecked cd would leave the mutation and the
+# `git checkout` that undoes it pointed at whatever directory this was
+# invoked from.
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 [[ -z "$(git status --porcelain)" ]] || { echo "tree dirty; refusing" >&2; exit 1; }
 
 run_one() {

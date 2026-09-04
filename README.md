@@ -334,7 +334,13 @@ already has. Two independent directions:
 .venv/bin/pytest -q
 .venv/bin/ruff check .
 .venv/bin/mypy src/wake tests
+shellcheck deploy/*.sh scripts/*.sh
 ```
+
+The shell scripts are checked at shellcheck's default severity, and the test
+suite runs it too when it is installed. `--enable=all` adds nothing here: its
+whole output is SC2310/SC2312 complaining that predicate functions appear in
+`if` conditions, which is what they are for.
 
 `scripts/mutate.sh` is a mutation audit: it flips one constant or comparison
 at a time and reports whether the suite noticed. It exists because a test that

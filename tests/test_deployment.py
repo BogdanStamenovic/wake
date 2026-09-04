@@ -108,8 +108,12 @@ def test_install_refuses_to_hijack_another_checkouts_unit() -> None:
 
 
 @pytest.mark.skipif(shutil.which("shellcheck") is None, reason="shellcheck not installed")
-@pytest.mark.parametrize("script", [INSTALL, UNINSTALL])
+@pytest.mark.parametrize(
+    "script", [INSTALL, UNINSTALL, REPOSITORY / "scripts" / "mutate.sh"]
+)
 def test_shellcheck(script: Path) -> None:
+    """Default severity only. `--enable=all` here is all SC2310/SC2312 noise
+    about predicate functions in `if`, which is what they are for."""
     subprocess.run(["shellcheck", str(script)], check=True)
 
 
