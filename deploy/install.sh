@@ -171,31 +171,46 @@ fi
 "${VENV}/bin/python" -m pip install --quiet "${REPOSITORY}"
 echo "Installed wake into ${VENV}."
 
-# ---- does that server answer? --------------------------------------------
+# ---- does that server answer, and is it wake? ----------------------------
 # Reported, never enforced. A device is legitimately installed before its
 # server exists -- and `wake agent` treats an unreachable server as retryable
 # rather than fatal, so refusing the install here would be stricter than the
 # thing being installed.
+#
+# The check is not "did something return 200". wake's default port is 8788 and
+# other things answer on it: on the machine this was written for, hotlined
+# holds 8788 and serves a /health that is valid JSON with an "ok" key, which an
+# HTTP-status check accepted as a wake server. So the payload has to look like
+# wake's health() -- ok/revision/role -- and the role has to be "server".
 if [[ -n ${SERVER_URL} ]]; then
   if "${VENV}/bin/python" - "${SERVER_URL}" <<'PROBE'
 import json, sys, urllib.error, urllib.request
+
 url = sys.argv[1].rstrip("/") + "/health"
 try:
     with urllib.request.urlopen(url, timeout=5) as response:
         body = json.loads(response.read() or b"{}")
 except urllib.error.HTTPError as exc:
-    print(f"  reached it, but {url} answered HTTP {exc.code}.")
+    print(f"  {url} answered HTTP {exc.code}.")
     raise SystemExit(1)
 except Exception as exc:
     print(f"  could not reach {url}: {exc}")
     raise SystemExit(1)
-print(f"  {url} answered: {json.dumps(body)}")
+
+if not isinstance(body, dict) or "role" not in body or "revision" not in body:
+    print(f"  something answers {url}, but it is not wake: {json.dumps(body)[:120]}")
+    raise SystemExit(1)
+if body.get("role") != "server":
+    print(f"  {url} is a wake {body.get('role')!r}, not the server.")
+    raise SystemExit(1)
+print(f"  {url}: wake server, revision {body.get('revision')}.")
 PROBE
   then
-    echo "Server ${SERVER_URL} looks alive."
+    echo "Server ${SERVER_URL} looks right."
   else
-    echo "Server ${SERVER_URL} did not answer. Installing anyway -- a device is"
-    echo "  allowed to exist before its server does, and the agent retries."
+    echo "Installing anyway -- a device is allowed to exist before its server"
+    echo "  does, and the agent retries. Fix SERVER_URL in the config if that"
+    echo "  address was wrong."
   fi
 fi
 
