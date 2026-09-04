@@ -4,8 +4,12 @@
 # For a laptop that suspends, prefer wake-sync.timer instead -- see the note in
 # that file. Nothing stops both being installed, but then both are syncing.
 #
-#   install -Dm644 systemd/wake-agent.service ~/.config/systemd/user/wake-agent.service
-#   systemctl --user daemon-reload && systemctl --user enable --now wake-agent.service
+# Do not copy this file into place by hand: @WAKE_ROOT@ below is a placeholder,
+# not a path. deploy/install.sh substitutes the checkout it is installing from.
+# It used to be a literal %h/data/wake, which was correct for exactly one
+# checkout on one machine and failed as 203/EXEC anywhere else.
+#
+#   deploy/install.sh --role device --unit agent
 
 [Unit]
 Description=wake: sync with the server and fire this machine's own tasks
@@ -21,7 +25,7 @@ ConditionPathExists=%h/.config/wake/wake.env
 
 [Service]
 Type=simple
-ExecStart=%h/data/wake/.venv/bin/wake agent
+ExecStart=@WAKE_ROOT@/.venv/bin/wake agent
 StateDirectory=wake
 # The server being unreachable is logged and retried, not fatal, so a restart
 # loop here means something structural -- a bad config, a missing venv.

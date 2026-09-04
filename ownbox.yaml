@@ -3,19 +3,33 @@ name: wake
 description: Schedule and fire wake-up tasks across a server/device pair
 homepage: https://github.com/BogdanStamenovic/wake
 tags: [cli, scheduler, wake-on-lan, hotline, python]
+
+# Ownbox drives the same deploy/ scripts the manual path uses rather than
+# building a second, parallel installation -- the pattern profiler set. Unlike
+# profiler, none of it needs root: wake is a *user* install, its units live in
+# the systemd user manager and its database sits under $HOME.
+#
+# install.sh is interactive. Ownbox runs setup commands through subprocess.run
+# with neither capture_output nor a stdin redirect (ownbox/store.py), so this
+# inherits the operator's terminal and can ask which role the machine is. With
+# no terminal it takes documented defaults instead of blocking -- Ownbox's
+# command timeout is 1800s, so a prompt nobody can answer is the worst failure
+# mode available. WAKE_INSTALL_ROLE / _SERVER_URL / _API_KEY / _UNIT skip the
+# matching prompt, which is how you script it.
+#
+# remove/ deliberately does NOT pass --purge, unlike profiler's. wake's state
+# is the operator's task database, not a build artifact; uninstall.sh prints
+# what it left behind and how to delete it on purpose.
 install:
-  platforms: [linux, darwin]
+  platforms: [linux]
   setup:
     linux:
-      - python -m venv .venv
-      - .venv/bin/python -m pip install -e .
-    darwin:
-      - python -m venv .venv
-      - .venv/bin/python -m pip install -e .
+      - bash deploy/install.sh
   update:
-    linux: [.venv/bin/python -m pip install -e .]
-    darwin: [.venv/bin/python -m pip install -e .]
-  remove: []
+    linux:
+      - bash deploy/install.sh --no-prompt
+  remove:
+    linux:
+      - bash deploy/uninstall.sh
 command:
   linux: .venv/bin/wake
-  darwin: .venv/bin/wake

@@ -21,6 +21,35 @@ Requires Python 3.11+. No third-party dependencies.
 ownbox install wake
 ```
 
+This runs `deploy/install.sh`, so it is a complete install rather than just a
+CLI: it asks whether the machine is the **server** or a **device**, asks a
+device for the server's address and the shared key, builds the venv, writes
+`~/.config/wake/wake.env` at mode 0600, and enables and starts the systemd user
+unit for that role.
+
+It can ask because Ownbox runs setup commands with its own stdio inherited, so
+the script gets the terminal you typed the command into. Where there is no
+terminal — a script, a cron job, a CI runner — nothing blocks: each prompt
+falls through to its documented default and says which it took and why. That
+matters more than it sounds, because Ownbox's command timeout is 1800 seconds,
+so a prompt with nobody to answer it would hang for half an hour before failing.
+
+To answer in advance and skip the prompts entirely:
+
+| Variable | Values | Default |
+|---|---|---|
+| `WAKE_INSTALL_ROLE` | `server`, `device` | `device` |
+| `WAKE_INSTALL_UNIT` | `server`, `agent`, `timer`, `none` | follows the role |
+| `WAKE_INSTALL_SERVER_URL` | host, `host:port` or a full URL | blank |
+| `WAKE_INSTALL_API_KEY` | the shared secret | blank |
+| `WAKE_INSTALL_NO_PROMPT` | `1` to never prompt, terminal or not | `0` |
+| `WAKE_INSTALL_TAKEOVER` | `1` to repoint another checkout's unit | `0` |
+
+`ownbox uninstall wake` runs `deploy/uninstall.sh`, which stops, disables and
+deletes the units it installed and removes the venv. It does **not** pass
+`--purge`: the task database is your data, not a build artifact, so it is
+listed as left behind rather than deleted.
+
 ### Manual
 
 ```
@@ -32,20 +61,53 @@ python -m venv .venv
 
 ### As a service
 
-`deploy/install.sh` builds the venv, writes `~/.config/wake/wake.env` at mode
-0600 if it is missing, and enables one systemd **user** unit:
+`deploy/install.sh` is the same script Ownbox drives, and takes flags for
+everything it would otherwise ask:
 
 ```
-deploy/install.sh --role server              # enables wake-server.service
-deploy/install.sh --role device              # enables wake-agent.service
-deploy/install.sh --role device --unit timer # enables wake-sync.timer instead
+deploy/install.sh                            # asks role, then server, then key
+deploy/install.sh --role server              # wake-server.service
+deploy/install.sh --role device --server-url 100.72.2.62
+deploy/install.sh --role device --unit timer # wake-sync.timer instead
 deploy/install.sh --role device --unit none  # no unit; run it by hand
+deploy/install.sh --no-prompt                # defaults, never asks
 ```
 
-It enables but does not start, so there is a moment to fill in the config
-first. Re-running is safe and never overwrites an existing config file.
-`deploy/uninstall.sh` reverses it, keeping the database and config unless
-given `--purge`. It also runs `systemctl --user reset-failed` and clears any
+A bare host is normalised: `100.72.2.62` becomes `http://100.72.2.62:8788`. The
+address is then probed with an unauthenticated `GET /health`, and an
+unreachable server is **reported, not enforced** — a device is legitimately
+installed before its server exists, and `wake agent` treats an unreachable
+server as retryable rather than fatal, so refusing here would be stricter than
+the thing being installed.
+
+The unit is enabled *and started*. A start that fails is reported and does not
+fail the install, for the same reason: a device whose server is not up yet is a
+normal state.
+
+Re-running is safe. An existing `wake.env` is never rewritten, and its `ROLE`
+is what the install follows — so a second run on a deployed machine does not
+quietly change what that machine is, and does not re-ask questions it can read
+the answer to.
+
+#### Two checkouts on one machine
+
+Ownbox keeps its own checkout under `~/.local/share/ownbox/tools/wake`, which
+may sit beside a working clone somewhere else. They share one systemd user
+manager and one config file, so both scripts check ownership by `ExecStart`:
+
+- **install** refuses to overwrite a unit whose `ExecStart` points into a
+  different checkout, because doing so would silently move a running daemon —
+  and its scheduled power tasks — onto a checkout nobody meant to deploy.
+  `--takeover` does it on purpose.
+- **uninstall** only removes units whose `ExecStart` is under the repository it
+  is run from, prints what it skipped, and takes `--all` to override.
+
+The unit files carry a `@WAKE_ROOT@` placeholder that `install.sh` substitutes
+with the checkout it is installing from, so **do not copy them into place by
+hand**. They previously hardcoded `%h/data/wake`, which was correct for one
+clone on one machine and produced a bare `203/EXEC` anywhere else.
+
+`deploy/uninstall.sh` also runs `systemctl --user reset-failed` and clears any
 timer stamp files, because neither is removed by disabling and deleting a
 unit — a unit that had failed keeps a `not-found failed` runtime entry, and a
 stamp file outlives its timer entirely.
@@ -318,5 +380,14 @@ while the real pair disagreed.
 - `wake` is one-shot per task row: there is no recurrence syntax. A caller that
   wants a recurring wakeup re-adds the next occurrence itself after observing a
   task fire.
+- The deploy scripts are Linux-only: every unit is a systemd **user** unit
+  and there are no launchd equivalents, so `ownbox.yaml` lists `linux`
+  alone. On macOS the package still imports and the CLI still runs, but
+  nothing installs it as a service.
+- `install.sh` writes the unit under `$HOME` while `systemctl --user` talks
+  to a manager that fixed its own home at login. Where those disagree —
+  `sudo -u`, a container on the host bus, a redirected `$HOME` — the
+  install refuses to enable anything rather than act on the real user's
+  daemon. Use `--unit none` there.
 - Nothing prunes the task table. Fired and cancelled rows accumulate; `list`
   hides them, but they are still there and still travel on a first sync.

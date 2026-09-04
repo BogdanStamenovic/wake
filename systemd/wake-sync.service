@@ -14,5 +14,5 @@ ConditionPathExists=%h/.config/wake/wake.env
 
 [Service]
 Type=oneshot
-ExecStart=%h/data/wake/.venv/bin/wake sync
+ExecStart=@WAKE_ROOT@/.venv/bin/wake sync
 StateDirectory=wake

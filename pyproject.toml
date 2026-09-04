@@ -27,6 +27,10 @@ dev = [
   "pytest-cov>=5.0,<7",
   "ruff>=0.6,<1",
   "mypy>=1.11,<3",
+  # ownbox.yaml is parsed by tests/test_deployment.py only; wake itself keeps
+  # its zero-dependency runtime.
+  "pyyaml>=6.0,<7",
+  "types-PyYAML>=6.0,<7",
 ]
 
 [project.scripts]
