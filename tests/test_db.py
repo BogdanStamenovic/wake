@@ -445,3 +445,45 @@ def test_no_owner_argument_still_means_the_server(db: WakeDB) -> None:
     task = _add(db, at=100.0)
     _add(db, at=100.0, owner="laptop")
     assert [t.id for t in db.due(now=500.0)] == [task.id]
+
+
+def test_an_old_databases_rows_survive_the_migration(tmp_path: Path) -> None:
+    """Upgrading a populated server is "update and restart", not a re-init."""
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        """
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY, task TEXT NOT NULL, at REAL NOT NULL,
+            backend TEXT NOT NULL, target TEXT, status TEXT NOT NULL,
+            origin TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+            rev INTEGER NOT NULL, owner TEXT NOT NULL DEFAULT '',
+            then_do TEXT NOT NULL DEFAULT '', timeout_seconds REAL,
+            pushed_rev INTEGER NOT NULL DEFAULT 0, fired_at REAL, error TEXT);
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+        INSERT INTO meta VALUES ('revision', 7);
+        INSERT INTO meta VALUES ('last_pulled_rev', 5);
+        INSERT INTO tasks VALUES
+            ('kept', 'echo hi', 100.0, 'shell', NULL, 'pending', 'server',
+             1.0, 1.0, 7, '', '', NULL, 7, NULL, NULL);
+        """
+    )
+    old.commit()
+    old.close()
+
+    with WakeDB(path) as db:
+        task = db.get("kept")
+        assert task is not None
+        assert task.repeat_seconds is None, "an existing row becomes a one-shot"
+        assert db.revision() == 7, "the revision counter is not reset"
+        assert db.get_meta("last_pulled_rev") == 5
+        assert db.add(
+            task="new", at=1.0, backend="shell", target=None, origin="server",
+            repeat_seconds=60.0,
+        ).repeat_seconds == 60.0
+
+
+def test_a_missing_task_says_which_database_it_looked_in(db: WakeDB) -> None:
+    """Nothing here deletes a row, so "no such task" means the wrong file."""
+    with pytest.raises(WakeError, match=str(db.path)):
+        db.cancel("never-existed")

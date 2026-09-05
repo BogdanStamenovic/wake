@@ -115,3 +115,23 @@ def test_the_sync_period_is_positive_and_slower_than_firing(tmp_path: Path) -> N
     assert config.sync_seconds == 60.0
     assert config.sync_seconds > 0
     assert config.sync_seconds > config.poll_seconds
+
+
+def test_the_environment_beats_a_config_file_that_pins_the_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WAKE_DB_PATH is the supported way to point a command at a scratch DB."""
+    config_file = tmp_path / "wake.env"
+    config_file.write_text(f"ROLE=device\nDB_PATH={tmp_path / 'pinned.db'}\n")
+    monkeypatch.setenv("WAKE_DB_PATH", str(tmp_path / "scratch.db"))
+    assert load_config(config_file).db_path == tmp_path / "scratch.db"
+
+
+def test_the_mac_is_read_from_both_places(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = tmp_path / "wake.env"
+    config_file.write_text("MAC=00:00:5e:00:53:2a\n")
+    assert load_config(config_file).mac == "00:00:5e:00:53:2a"
+    monkeypatch.setenv("WAKE_MAC", "00:00:5e:00:53:ff")
+    assert load_config(config_file).mac == "00:00:5e:00:53:ff"

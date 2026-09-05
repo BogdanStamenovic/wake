@@ -74,6 +74,12 @@ class WakeError(Exception):
     """Raised when wake cannot complete an operation."""
 
 
+# Nothing in this module deletes a row -- there is no DELETE, DROP or VACUUM
+# anywhere in wake -- so a task that is missing was never in *this* file. That
+# makes "no such task" almost always a wrong-database answer, and it read as a
+# lost row until the message started naming the file it looked in.
+
+
 class WakeDB:
     """A task table plus the revision counter that makes it syncable.
 
@@ -217,7 +223,7 @@ class WakeDB:
         with self._lock:
             existing = self.get(id)
             if existing is None:
-                raise WakeError(f"no such task: {id}")
+                raise WakeError(f"no such task in {self.path}: {id}")
             now = time.time()
             rev = self._next_rev()
             self._conn.execute(
@@ -292,7 +298,7 @@ class WakeDB:
         with self._lock:
             existing = self.get(id)
             if existing is None:
-                raise WakeError(f"no such task: {id}")
+                raise WakeError(f"no such task in {self.path}: {id}")
             if expect_rev is not None and existing.rev != expect_rev:
                 return None
             rev = self._next_rev()
@@ -383,7 +389,7 @@ class WakeDB:
         with self._lock:
             existing = self.get(id)
             if existing is None:
-                raise WakeError(f"no such task: {id}")
+                raise WakeError(f"no such task in {self.path}: {id}")
             if expect_rev is not None and existing.rev != expect_rev:
                 return None
             rev = self._next_rev()

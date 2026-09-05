@@ -266,8 +266,28 @@ def _cmd_list(args: argparse.Namespace, config: WakeConfig) -> int:
     return 0
 
 
+def _missing(config: WakeConfig, task_id: str) -> None:
+    """Explain a task id this database has never heard of.
+
+    Worth more than one line because the honest answer is nearly always "you
+    are looking at a different database". Nothing in wake deletes a row, so the
+    id is either mistyped, in another file, or on a machine this one has not
+    synced with yet -- and the bare "no such task" named none of those.
+    """
+    print(f"wake: error: no such task in {config.db_path}: {task_id}", file=sys.stderr)
+    if config.role == "device" and config.server_url:
+        print(
+            "wake: a task created on another machine reaches this device only on its "
+            "next sync; try `wake sync` first.",
+            file=sys.stderr,
+        )
+
+
 def _cmd_cancel(args: argparse.Namespace, config: WakeConfig, log: Logger) -> int:
     with _open_db(config) as db:
+        if db.get(args.id) is None:
+            _missing(config, args.id)
+            return 1
         task = db.cancel(args.id)
     if task.repeat_seconds:
         log(f"cancelled {task.id}; it will not recur again")
@@ -365,7 +385,7 @@ def _cmd_fire(args: argparse.Namespace, config: WakeConfig, log: Logger) -> int:
     with _open_db(config) as db:
         task = db.get(args.id)
         if task is None:
-            print(f"wake: error: no such task: {args.id}", file=sys.stderr)
+            _missing(config, args.id)
             return 1
         if task.backend == "rtcwake":
             backends.arm_rtcwake(task)
