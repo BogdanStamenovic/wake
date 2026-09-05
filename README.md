@@ -431,6 +431,13 @@ database adds the column, leaves every row and the revision counter alone, and
 treats what is already there as one-shot — so deploying is update-and-restart
 with no data step.
 
+The reverse pairing, an **old binary against an already-migrated database**, is
+safe but not neutral. Every statement names its columns, so the old code reads
+the database, fires tasks normally, and leaves `repeat_seconds` untouched on
+rows it writes — the period survives. What it does not do is re-arm: a recurring
+task it fires is marked `fired`, which is terminal, and upgrading afterwards
+does not bring it back. Re-add the task after the upgrade.
+
 ## Configuration
 
 Read from `~/.config/wake/wake.env` (or `--config <path>` / `$WAKE_CONFIG`),
