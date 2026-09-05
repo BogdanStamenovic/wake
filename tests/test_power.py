@@ -274,7 +274,7 @@ def test_a_refused_poweroff_puts_the_watchdog_back(monkeypatch: pytest.MonkeyPat
 
     task = Task(
         id="t", task="true", at=1.0, backend="shell", target=None, status="pending",
-        origin="archserver", created_at=1.0, updated_at=1.0, rev=1, then_do="poweroff",
+        origin="desktop", created_at=1.0, updated_at=1.0, rev=1, then_do="poweroff",
     )
 
     class _DB:
@@ -282,7 +282,7 @@ def test_a_refused_poweroff_puts_the_watchdog_back(monkeypatch: pytest.MonkeyPat
             return []
 
     outcome = server.finish_power(
-        cast("Any", _DB()), WakeConfig(origin="archserver"), task, succeeded=False
+        cast("Any", _DB()), WakeConfig(origin="desktop"), task, succeeded=False
     )
     assert "poweroff FAILED" in outcome
     assert events == ["stopped", "restored"]

@@ -75,18 +75,18 @@ def test_shell_surfaces_the_error_text() -> None:
 
 
 def test_magic_packet_is_six_ff_bytes_then_the_mac_sixteen_times() -> None:
-    packet = magic_packet("a8:a1:59:fd:4d:13")
+    packet = magic_packet("00:00:5e:00:53:2a")
     assert len(packet) == 102
     assert packet[:6] == b"\xff" * 6
-    assert packet[6:] == bytes.fromhex("a8a159fd4d13") * 16
+    assert packet[6:] == bytes.fromhex("00005e00532a") * 16
 
 
-@pytest.mark.parametrize("form", ["a8:a1:59:fd:4d:13", "a8-a1-59-fd-4d-13", "a8a159fd4d13"])
+@pytest.mark.parametrize("form", ["00:00:5e:00:53:2a", "00-00-5e-00-53-2a", "00005e00532a"])
 def test_magic_packet_accepts_the_usual_mac_spellings(form: str) -> None:
-    assert magic_packet(form) == magic_packet("a8:a1:59:fd:4d:13")
+    assert magic_packet(form) == magic_packet("00:00:5e:00:53:2a")
 
 
-@pytest.mark.parametrize("bad", ["", "not-a-mac", "a8:a1:59:fd:4d", "a8:a1:59:fd:4d:13:99"])
+@pytest.mark.parametrize("bad", ["", "not-a-mac", "00:00:5e:00:53", "00:00:5e:00:53:2a:99"])
 def test_magic_packet_refuses_anything_that_is_not_a_mac(bad: str) -> None:
     with pytest.raises(BackendError, match="not a MAC address"):
         magic_packet(bad)
@@ -120,13 +120,13 @@ def test_wol_sends_the_packet_over_a_real_socket() -> None:
         original = backends.WOL_PORT
         backends.WOL_PORT = port
         try:
-            fire_wol(make_task(target="a8:a1:59:fd:4d:13@127.0.0.1"), WakeConfig())
+            fire_wol(make_task(target="00:00:5e:00:53:2a@127.0.0.1"), WakeConfig())
             data, _ = listener.recvfrom(200)
         finally:
             backends.WOL_PORT = original
     finally:
         listener.close()
-    assert data == magic_packet("a8:a1:59:fd:4d:13")
+    assert data == magic_packet("00:00:5e:00:53:2a")
 
 
 def test_wol_without_a_target_is_an_error() -> None:

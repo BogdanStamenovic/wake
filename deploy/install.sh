@@ -25,6 +25,10 @@ ROLE="${WAKE_INSTALL_ROLE:-}"
 UNIT="${WAKE_INSTALL_UNIT:-}"
 SERVER_URL="${WAKE_INSTALL_SERVER_URL:-}"
 API_KEY="${WAKE_INSTALL_API_KEY:-}"
+MAC="${WAKE_INSTALL_MAC:-}"
+WOL_BROADCAST="${WAKE_INSTALL_WOL_BROADCAST:-}"
+HOTLINE_URL="${WAKE_INSTALL_HOTLINE_URL:-}"
+HOTLINE_KEY="${WAKE_INSTALL_HOTLINE_KEY:-}"
 NO_PROMPT="${WAKE_INSTALL_NO_PROMPT:-0}"
 TAKEOVER="${WAKE_INSTALL_TAKEOVER:-0}"
 ROLE_GIVEN=0
@@ -36,23 +40,33 @@ while [[ $# -gt 0 ]]; do
     --unit) UNIT="${2:-}"; shift 2 ;;
     --server-url) SERVER_URL="${2:-}"; shift 2 ;;
     --api-key) API_KEY="${2:-}"; shift 2 ;;
+    --mac) MAC="${2:-}"; shift 2 ;;
+    --wol-broadcast) WOL_BROADCAST="${2:-}"; shift 2 ;;
+    --hotline-url) HOTLINE_URL="${2:-}"; shift 2 ;;
+    --hotline-key) HOTLINE_KEY="${2:-}"; shift 2 ;;
     --no-prompt) NO_PROMPT=1; shift ;;
     --takeover) TAKEOVER=1; shift ;;
     -h|--help)
       cat <<'USAGE'
 usage: deploy/install.sh [--role server|device] [--unit server|agent|timer|none]
-                         [--server-url URL] [--api-key KEY] [--no-prompt]
-                         [--takeover]
+                         [--server-url URL] [--api-key KEY] [--mac ADDRESS]
+                         [--wol-broadcast ADDRESS] [--hotline-url URL]
+                         [--hotline-key KEY] [--no-prompt] [--takeover]
 
 Prompts for anything not supplied, when there is a terminal to prompt on.
 Environment equivalents, each skipping its prompt:
 
-  WAKE_INSTALL_ROLE        server | device        (default: device)
-  WAKE_INSTALL_UNIT        server|agent|timer|none  (default: follows the role)
-  WAKE_INSTALL_SERVER_URL  the server's base URL, devices only
-  WAKE_INSTALL_API_KEY     the shared secret, both roles
-  WAKE_INSTALL_NO_PROMPT   1 to never prompt even on a terminal
-  WAKE_INSTALL_TAKEOVER    1 to repoint a unit that belongs to another checkout
+  WAKE_INSTALL_ROLE           server | device         (default: device)
+  WAKE_INSTALL_UNIT           server|agent|timer|none (default: follows the role)
+  WAKE_INSTALL_SERVER_URL     the server's base URL, devices only
+  WAKE_INSTALL_API_KEY        the shared secret, both roles
+  WAKE_INSTALL_MAC            this machine's MAC, what wol tasks target by
+                              default; "none" to store none  (default: detected)
+  WAKE_INSTALL_WOL_BROADCAST  broadcast address for wol      (default: blank)
+  WAKE_INSTALL_HOTLINE_URL    hotline-ios base URL, for the notify/call backends
+  WAKE_INSTALL_HOTLINE_KEY    hotline-ios shared key
+  WAKE_INSTALL_NO_PROMPT      1 to never prompt even on a terminal
+  WAKE_INSTALL_TAKEOVER       1 to repoint a unit that belongs to another checkout
 USAGE
       exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -120,8 +134,8 @@ if [[ ${ROLE_GIVEN} -eq 1 && -n ${EXISTING_ROLE} && ${EXISTING_ROLE} != "${ROLE}
 fi
 
 # ---- the server's address, for a device ----------------------------------
-normalise_url() {  # bare host -> http://host:8788
-  local url="${1//[[:space:]]/}"
+normalise_url() {  # normalise_url <url> [default port]; bare host -> http://host:8788
+  local url="${1//[[:space:]]/}" default_port="${2:-8788}"
   [[ -n ${url} ]] || return 0
   [[ ${url} == *"://"* ]] || url="http://${url}"
   local scheme="${url%%://*}" rest="${url#*://}"
@@ -132,7 +146,7 @@ normalise_url() {  # bare host -> http://host:8788
   # unbracketed IPv6 address is ambiguous with one and is not handled here --
   # write it as [::1]:8788.
   if [[ ${authority} == "["*"]" ]] || [[ ${authority} != *:* ]]; then
-    authority="${authority}:8788"
+    authority="${authority}:${default_port}"
   fi
   url="${scheme}://${authority}${path}"
   printf '%s' "${url%/}"
@@ -149,9 +163,9 @@ fi
 [[ -n ${SERVER_URL} ]] && SERVER_URL="$(normalise_url "${SERVER_URL}")"
 
 # ---- the shared secret ---------------------------------------------------
-# Not something Bogdan asked to be prompted for, but a device without it gets a
-# 401 from any server that has one, so an install that skipped it would be
-# "finished" and not actually able to sync. Blank is a valid answer.
+# A device without it gets a 401 from any server that has one, so an install
+# that skipped this would be "finished" and not actually able to sync. Blank is
+# a valid answer -- a server with no key set does not check.
 if [[ -z ${API_KEY} && -z ${EXISTING_ROLE} ]]; then
   if interactive; then
     if [[ ${ROLE} == "device" ]]; then
@@ -159,6 +173,113 @@ if [[ -z ${API_KEY} && -z ${EXISTING_ROLE} ]]; then
     else
       API_KEY="$(ask "Shared key devices must send (X-Wake-Key), blank to leave the port open: " "")"
     fi
+  fi
+fi
+
+# ---- this machine's own hardware --------------------------------------------
+# The gap this closes: the MAC is per-task `--target`, so before this a fresh
+# install had nothing to wake and no obvious place to put an address. It is
+# stored in the config instead, and `wake add --backend wol` with no --target
+# fills it in at add time -- deliberately at add time, because the machine that
+# ends up sending the packet is not the machine whose address it is and has no
+# way to look the other one's config up.
+
+detect_mac() {  # prints this machine's most likely MAC, or nothing
+  local interface="" candidate address
+  # The interface carrying the default route is the one a magic packet would
+  # arrive on. `ip` is not guaranteed present, hence the sysfs fallback.
+  if command -v ip >/dev/null 2>&1; then
+    interface="$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')"
+  fi
+  if [[ -z ${interface} ]]; then
+    for candidate in /sys/class/net/*; do
+      [[ -e ${candidate} ]] || continue
+      [[ $(basename "${candidate}") != "lo" ]] || continue
+      # type 1 is ARPHRD_ETHER. Everything else -- tunnels, tailscale, bridges
+      # -- either has no MAC or has one no switch will ever see a packet for.
+      [[ $(cat "${candidate}/type" 2>/dev/null || echo 0) == "1" ]] || continue
+      [[ ! -e ${candidate}/device ]] && continue  # virtual: docker0, br-*, veth
+      interface="$(basename "${candidate}")"
+      break
+    done
+  fi
+  [[ -n ${interface} ]] || return 0
+  address="$(cat "/sys/class/net/${interface}/address" 2>/dev/null || true)"
+  [[ ${address} != "00:00:00:00:00:00" ]] || return 0
+  printf '%s' "${address}"
+}
+
+detected_interface_is_wireless() {
+  local interface=""
+  command -v ip >/dev/null 2>&1 || return 1
+  interface="$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')"
+  [[ -n ${interface} && -e /sys/class/net/${interface}/wireless ]]
+}
+
+valid_mac() {  # valid_mac <address>
+  local cleaned="${1//[^0-9a-fA-F]/}"
+  [[ ${#cleaned} -eq 12 ]]
+}
+
+if [[ -z ${MAC} && -z ${EXISTING_ROLE} ]]; then
+  DETECTED_MAC="$(detect_mac)"
+  if interactive; then
+    while :; do
+      MAC="$(ask "This machine's MAC address, so something can wake it \
+[${DETECTED_MAC:-none}]: " "${DETECTED_MAC}")"
+      [[ -z ${MAC} || ${MAC,,} == "none" ]] && { MAC=""; break; }
+      valid_mac "${MAC}" && break
+      echo "  '${MAC}' is not a MAC address -- twelve hex digits, any separator."
+    done
+  else
+    MAC="${DETECTED_MAC}"
+    if [[ -n ${MAC} ]]; then
+      echo "No terminal to ask on: using the detected MAC ${MAC}."
+      echo "Pass --mac (or --mac none) to choose."
+    fi
+  fi
+elif [[ ${MAC,,} == "none" ]]; then
+  MAC=""
+fi
+
+if [[ -n ${MAC} ]] && ! valid_mac "${MAC}"; then
+  echo "Ignoring --mac '${MAC}': not twelve hex digits." >&2
+  MAC=""
+fi
+
+if [[ -n ${MAC} ]] && detected_interface_is_wireless; then
+  echo "Note: the default route is on a wireless interface. Wake-on-LAN over"
+  echo "  WiFi needs WoWLAN support on both the card and the access point, and"
+  echo "  usually does not survive a suspend. A wired MAC is the reliable one."
+fi
+
+# Only worth asking once someone has a MAC to send packets to. The default,
+# 255.255.255.255, reaches the local subnet and is right for most installs;
+# this is for the case where the sender is somewhere else.
+if [[ -n ${MAC} && -z ${WOL_BROADCAST} && -z ${EXISTING_ROLE} ]]; then
+  if interactive; then
+    WOL_BROADCAST="$(ask "Broadcast address for wake-on-LAN packets, blank for \
+the local subnet: " "")"
+  fi
+fi
+
+# ---- hotline-ios, for the notify and call backends -------------------------
+# Both backends are inert without a URL, and there is no default worth
+# guessing: it is another machine on the operator's own network.
+if [[ -z ${HOTLINE_URL} && -z ${EXISTING_ROLE} ]]; then
+  if interactive; then
+    HOTLINE_URL="$(ask "hotline-ios address for the notify/call backends, \
+blank to skip: " "")"
+  else
+    echo "No terminal to ask on: leaving HOTLINE_IOS_URL blank."
+    echo "The notify and call backends stay unavailable until it is set."
+  fi
+fi
+if [[ -n ${HOTLINE_URL} ]]; then
+  HOTLINE_URL="$(normalise_url "${HOTLINE_URL}" 8789)"
+  if [[ -z ${HOTLINE_KEY} && -z ${EXISTING_ROLE} ]] && interactive; then
+    HOTLINE_KEY="$(ask "hotline-ios shared key (X-Hotline-Key), blank if it \
+has none: " "")"
   fi
 fi
 
@@ -230,6 +351,10 @@ if [[ ! -f ${CONFIG_FILE} ]]; then
     printf 'ROLE=%s\n' "${ROLE}"
     if [[ -n ${SERVER_URL} ]]; then printf 'SERVER_URL=%s\n' "${SERVER_URL}"; fi
     if [[ -n ${API_KEY} ]]; then printf 'API_KEY=%s\n' "${API_KEY}"; fi
+    if [[ -n ${MAC} ]]; then printf 'MAC=%s\n' "${MAC}"; fi
+    if [[ -n ${WOL_BROADCAST} ]]; then printf 'WOL_BROADCAST=%s\n' "${WOL_BROADCAST}"; fi
+    if [[ -n ${HOTLINE_URL} ]]; then printf 'HOTLINE_IOS_URL=%s\n' "${HOTLINE_URL}"; fi
+    if [[ -n ${HOTLINE_KEY} ]]; then printf 'HOTLINE_IOS_KEY=%s\n' "${HOTLINE_KEY}"; fi
   } >> "${CONFIG_FILE}"
   echo "Wrote ${CONFIG_FILE} (ROLE=${ROLE})."
   [[ ${ROLE} == "device" && -z ${SERVER_URL} ]] && \
@@ -351,5 +476,6 @@ fi
 echo
 echo "wake is installed from ${REPOSITORY} as a ${ROLE}."
 echo "  config: ${CONFIG_FILE}"
+if [[ -n ${MAC} ]]; then echo "  mac:    ${MAC} (wol tasks target this by default)"; fi
 echo "  state:  ${STATE_DIR}"
 echo "  cli:    ${VENV}/bin/wake"

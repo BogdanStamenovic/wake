@@ -22,10 +22,17 @@ ownbox install wake
 ```
 
 This runs `deploy/install.sh`, so it is a complete install rather than just a
-CLI: it asks whether the machine is the **server** or a **device**, asks a
-device for the server's address and the shared key, builds the venv, writes
-`~/.config/wake/wake.env` at mode 0600, and enables and starts the systemd user
-unit for that role.
+CLI. It asks this machine everything it cannot work out for itself — whether it
+is the **server** or a **device**, a device's server address and shared key,
+**this machine's MAC address** (offered pre-filled, detected from the interface
+carrying the default route), the Wake-on-LAN broadcast address, and where
+hotline-ios lives for the `notify` and `call` backends. Then it builds the venv,
+writes `~/.config/wake/wake.env` at mode 0600, and enables and starts the
+systemd user unit for that role.
+
+The MAC is asked because without it a fresh install has nothing to wake. A MAC
+is otherwise per-task `--target`, with no obvious place to keep it; stored in
+the config, `wake add --backend wol` with no `--target` fills it in.
 
 It can ask because Ownbox runs setup commands with its own stdio inherited, so
 the script gets the terminal you typed the command into. Where there is no
@@ -42,8 +49,20 @@ To answer in advance and skip the prompts entirely:
 | `WAKE_INSTALL_UNIT` | `server`, `agent`, `timer`, `none` | follows the role |
 | `WAKE_INSTALL_SERVER_URL` | host, `host:port` or a full URL | blank |
 | `WAKE_INSTALL_API_KEY` | the shared secret | blank |
+| `WAKE_INSTALL_MAC` | this machine's MAC, or `none` to store none | detected |
+| `WAKE_INSTALL_WOL_BROADCAST` | broadcast address for `wol` packets | blank |
+| `WAKE_INSTALL_HOTLINE_URL` | hotline-ios base URL | blank |
+| `WAKE_INSTALL_HOTLINE_KEY` | hotline-ios shared key | blank |
 | `WAKE_INSTALL_NO_PROMPT` | `1` to never prompt, terminal or not | `0` |
 | `WAKE_INSTALL_TAKEOVER` | `1` to repoint another checkout's unit | `0` |
+
+MAC detection reads the interface carrying the default route, falling back to
+the first physical Ethernet device in `/sys/class/net` — `type` 1 with a real
+`device` link, so tunnels, bridges and tailscale interfaces are skipped. An
+answer that is not twelve hex digits is re-asked on a terminal and dropped with
+a note without one; `none` stores nothing. If the default route is wireless the
+install says so, because Wake-on-LAN over WiFi needs WoWLAN on both the card and
+the access point and usually does not survive a suspend.
 
 `ownbox uninstall wake` runs `deploy/uninstall.sh`, which stops, disables and
 deletes the units it installed and removes the venv. It does **not** pass
@@ -65,15 +84,18 @@ python -m venv .venv
 everything it would otherwise ask:
 
 ```
-deploy/install.sh                            # asks role, then server, then key
+deploy/install.sh                            # asks everything, in order
 deploy/install.sh --role server              # wake-server.service
-deploy/install.sh --role device --server-url 100.72.2.62
+deploy/install.sh --role device --server-url 192.0.2.10
+deploy/install.sh --mac 00:00:5e:00:53:2a    # skip the MAC prompt
+deploy/install.sh --mac none                 # store no MAC at all
+deploy/install.sh --hotline-url 192.0.2.10 --hotline-key KEY
 deploy/install.sh --role device --unit timer # wake-sync.timer instead
 deploy/install.sh --role device --unit none  # no unit; run it by hand
 deploy/install.sh --no-prompt                # defaults, never asks
 ```
 
-A bare host is normalised: `100.72.2.62` becomes `http://100.72.2.62:8788`. The
+A bare host is normalised: `192.0.2.10` becomes `http://192.0.2.10:8788`. The
 address is then probed with an unauthenticated `GET /health`, and an
 unreachable server is **reported, not enforced** — a device is legitimately
 installed before its server exists, and `wake agent` treats an unreachable
@@ -160,7 +182,7 @@ wake add --at +30m --task "systemctl restart myservice"
 wake add --at +30m --task "systemctl --user restart myservice" --on laptop
 
 # Wake a sleeping desktop by MAC address at 07:00 tomorrow
-wake add --at 2026-09-04T07:00:00 --backend wol --target a8:a1:59:fd:4d:13 --task wol
+wake add --at 2026-09-04T07:00:00 --backend wol --target 00:00:5e:00:53:2a --task wol
 
 # Arm this laptop's own RTC alarm to resume from suspend in 6 hours
 wake add --at +6h --backend rtcwake --task rtcwake
@@ -191,7 +213,7 @@ wake cancel 3f9a2c1b
   binary, which is not installed everywhere and would be a system-wide package
   for 102 bytes. `--target` takes a MAC in any usual spelling, optionally
   suffixed with `@<address>` to reach another subnet by directed broadcast
-  (`a8:a1:59:fd:4d:13@10.0.0.255`).
+  (`00:00:5e:00:53:2a@192.0.2.255`).
 - **`rtcwake`** — **armed locally at `add` time**, not fired later by the
   server. A suspended machine cannot run a scheduler loop to wake itself, so
   `wake add --backend rtcwake` calls `rtcwake -m no -t <epoch>` immediately on
@@ -384,10 +406,38 @@ Conflicting edits to the same task id — rare, since normally only the owning
 side edits a task — are resolved last-write-wins by `updated_at`, once, inside
 `WakeDB.merge`. Nothing else in the system compares timestamps.
 
+### Running a mixed pair
+
+An older server and a newer device is a real state — the server is usually the
+box you upgrade last — and it matters, because the server is what fires
+unassigned tasks and what every device syncs against. Recurrence is the one
+field where the skew is visible. Measured against a wake built before `--every`
+existed:
+
+| Task | Against an old server |
+| --- | --- |
+| Anything without `--every` | Unaffected |
+| `--every` **with** `--on <this device>` | **Works.** The device holds the period and re-arms itself; the server only stores the time and the status |
+| `--every` **without** `--on` (the server fires it) | **Broken.** The server drops the period, fires once, marks it `fired` — and the device then pulls that back and loses its own copy too |
+
+That second row is the failure recurrence exists to remove, so it is no longer
+silent. The push already gets the stored row echoed back, so `wake sync` and
+`wake agent` compare it against what they sent and log a warning naming the
+tasks whose period the server did not keep. Nothing fails: the task is still
+scheduled, it just will not repeat.
+
+**Upgrade the server first.** The migration is additive — opening an existing
+database adds the column, leaves every row and the revision counter alone, and
+treats what is already there as one-shot — so deploying is update-and-restart
+with no data step.
+
 ## Configuration
 
 Read from `~/.config/wake/wake.env` (or `--config <path>` / `$WAKE_CONFIG`),
-then overridden by `WAKE_*` environment variables. `KEY=value` lines, `#`
+then overridden by `WAKE_*` environment variables. The environment always wins,
+including over a config file that pins the key: `WAKE_DB_PATH=/tmp/scratch.db
+wake add ...` is the supported way to point one command at a throwaway
+database, and it works even though the installed `wake.env` sets `DB_PATH`. `KEY=value` lines, `#`
 comments, quoting optional — same format as `profiler`'s env file.
 `deploy/wake.env.example` is a commented starting point.
 
@@ -405,6 +455,7 @@ comments, quoting optional — same format as `profiler`'s env file.
 | `HOTLINE_IOS_URL` | Base URL for the `notify` and `call` backends | (unset) |
 | `HOTLINE_IOS_KEY` | `X-Hotline-Key` for those backends | (unset) |
 | `WOL_BROADCAST` | Default broadcast address for `wol` | `255.255.255.255` |
+| `MAC` | This machine's MAC; `wol` tasks with no `--target` use it | (unset) |
 
 ## HTTP API
 
@@ -496,6 +547,16 @@ while the real pair disagreed.
   twenty hours still gets its catch-up run when the machine comes up, and there
   is no way to say "skip it if it is more than an hour late".
 - The shortest period is 60 seconds. There is no sub-minute scheduling.
+- Recurrence needs the machine that *fires* the task to understand it. A server
+  older than `--every` turns a server-owned recurring task into a one-shot; the
+  device warns, but cannot prevent it. See "Running a mixed pair".
+- `install.sh` guesses one MAC, from the default route. A machine with several
+  NICs, or one whose Wake-on-LAN NIC is not the one carrying the default route,
+  needs `--mac` or an edit to `wake.env`.
+- Nothing verifies that a stored `MAC` belongs to this machine, or that
+  Wake-on-LAN is enabled in its firmware and NIC at all. `wake` sends the packet
+  and reports that it sent it; whether anything wakes up is not observable from
+  here.
 - The deploy scripts are Linux-only: every unit is a systemd **user** unit
   and there are no launchd equivalents, so `ownbox.yaml` lists `linux`
   alone. On macOS the package still imports and the CLI still runs, but

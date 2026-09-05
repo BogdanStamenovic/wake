@@ -54,10 +54,10 @@ def fire_shell(task: Task, config: WakeConfig) -> None:
 
 # -- wake-on-lan -------------------------------------------------------------
 # The magic packet is built and sent here rather than shelled out to the
-# `wakeonlan` binary, which is not installed on every box wake runs on (it is
-# absent on archserver) and would be an unnecessary system-wide package for
-# six 0xff bytes and sixteen copies of a MAC. Unprivileged: a broadcast UDP
-# datagram needs SO_BROADCAST, not root.
+# `wakeonlan` binary, which is not installed on every box wake runs on and
+# would be an unnecessary system-wide package for six 0xff bytes and sixteen
+# copies of a MAC. Unprivileged: a broadcast UDP datagram needs SO_BROADCAST,
+# not root.
 
 
 def magic_packet(mac: str) -> bytes:
@@ -126,13 +126,13 @@ def fire_notify(task: Task, config: WakeConfig) -> None:
 
 
 def fire_call(task: Task, config: WakeConfig) -> None:
-    """Ring Bogdan's phone for real, and do not wait for him to answer.
+    """Ring the phone for real, and do not wait for an answer.
 
     ``wait: false`` is the whole point. hotline-ios's ``/api/v1/call`` defaults
     to blocking for up to 900s while it waits for a typed reply in the app --
     which is right for `hotline-call`, and wrong here: the scheduler thread
     would sit on one alarm while every later task went unfired. A wake task
-    rings and returns; the reply, if he sends one, lands in the conversation
+    rings and returns; a reply, if one comes, lands in the conversation
     hotline-ios opened.
     """
     _post_hotline(

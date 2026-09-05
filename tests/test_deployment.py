@@ -72,8 +72,8 @@ def test_scripts_parse(script: Path) -> None:
 @pytest.mark.parametrize(
     ("given", "expected"),
     [
-        ("100.72.2.62", "http://100.72.2.62:8788"),
-        ("100.72.2.62:9000", "http://100.72.2.62:9000"),
+        ("192.0.2.10", "http://192.0.2.10:8788"),
+        ("192.0.2.10:9000", "http://192.0.2.10:9000"),
         ("http://box", "http://box:8788"),
         ("http://box/", "http://box:8788"),
         ("https://box:443/api", "https://box:443/api"),
