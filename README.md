@@ -287,6 +287,23 @@ cancel.
 an rtc alarm is armed once, at `add` time, on the machine you ran it on, and no
 scheduler ever sees that task again to re-arm it.
 
+#### Why this is not just re-arm-after-run
+
+A caller can get a repeating schedule without `--every`, by re-adding the next
+occurrence at the end of every run (see below), and callers did. That scheme has
+two failure modes a row in the database does not:
+
+- **A run that dies before the re-arm ends the schedule permanently.** The next
+  occurrence was never written, so there is nothing left to fire and nothing to
+  notice. It is silent and terminal.
+- **A machine that is off when the task was due never re-arms either**, for the
+  same reason: the re-arm lives inside a run that did not happen.
+
+`--every` puts the schedule in the row rather than in the run. The next
+occurrence is written by wake itself, before anything can go wrong with the
+command, and survives a crashed run, a failed run, and a machine that was off
+for a week.
+
 #### Missed occurrences
 
 **One catch-up run, then back on schedule.** Whole periods are added to the
