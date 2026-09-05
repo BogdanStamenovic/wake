@@ -15,6 +15,7 @@ where both sides edited the same task id.
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.request
 from typing import Any
@@ -23,6 +24,7 @@ from .config import WakeConfig
 from .db import WakeDB
 from .models import Task
 
+LOG = logging.getLogger("wake.sync")
 REQUEST_TIMEOUT = 10.0
 
 
@@ -65,9 +67,27 @@ def push(db: WakeDB, config: WakeConfig) -> int:
     still pending -- the next run resumes rather than restarting.
     """
     pending = db.unpushed(config.origin)
+    dropped = []
     for task in pending:
-        _post(config, "/api/v1/tasks", task.to_dict())
+        stored = _post(config, "/api/v1/tasks", task.to_dict())
+        # The server echoes back the row it stored, which costs nothing extra
+        # and is the only way to notice a server too old to understand a field.
+        # It matters for exactly one field so far: a server without
+        # `repeat_seconds` drops it, fires the task once, marks it `fired`, and
+        # the device then pulls that back and loses its own copy of the period.
+        # A recurring task quietly becoming a one-shot is the failure this
+        # feature exists to remove, so it must not happen quietly.
+        if task.repeat_seconds and stored.get("repeat_seconds") is None:
+            dropped.append(task.id)
         db.mark_pushed(task.id, task.rev)
+    if dropped:
+        LOG.warning(
+            "the server did not store the repeat period on %d task(s) (%s) and will "
+            "not recur them: it is running a wake too old for --every. Tasks this "
+            "device owns (--on %s) still recur, because this device re-arms those "
+            "itself; tasks the server fires will run once and stop.",
+            len(dropped), ", ".join(t[:8] for t in dropped), config.origin,
+        )
     return len(pending)
 
 

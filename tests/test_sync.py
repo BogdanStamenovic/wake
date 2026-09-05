@@ -379,3 +379,42 @@ def test_a_cancel_is_not_undone_by_a_late_re_arm(
 
     landed = server_db.get(task.id)
     assert landed is not None and landed.status == "cancelled"
+
+
+def test_a_server_that_drops_the_period_is_reported(
+    device_db: WakeDB, live_server: WakeConfig, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wake old enough to lack `repeat_seconds` silently makes it a one-shot.
+
+    The server fires it once, marks it `fired`, and the device pulls that back
+    and loses its own copy of the period -- the exact silent-and-terminal
+    failure recurrence exists to remove, so the push has to notice. It costs
+    nothing: the server already echoes back the row it stored.
+    """
+    from wake import syncclient
+
+    real_post = syncclient._post
+
+    def old_server(config: WakeConfig, path: str, body: dict[str, object]) -> dict[str, object]:
+        stored = real_post(config, path, body)
+        stored.pop("repeat_seconds", None)  # a server that never knew the column
+        return stored
+
+    monkeypatch.setattr(syncclient, "_post", old_server)
+    device_db.add(
+        task="morning", at=1.0, backend="shell", target=None, origin="laptop",
+        repeat_seconds=86400.0,
+    )
+    with caplog.at_level("WARNING"):
+        assert push(device_db, live_server) == 1
+    assert "will not recur" in caplog.text
+
+
+def test_a_one_shot_task_against_an_old_server_says_nothing(
+    device_db: WakeDB, live_server: WakeConfig, caplog: pytest.LogCaptureFixture,
+) -> None:
+    device_db.add(task="once", at=1.0, backend="shell", target=None, origin="laptop")
+    with caplog.at_level("WARNING"):
+        push(device_db, live_server)
+    assert caplog.text == ""
