@@ -87,7 +87,15 @@ def test_the_floor_is_a_minute() -> None:
 
 
 def test_a_future_occurrence_is_left_alone() -> None:
-    """Firing early -- `wake fire` -- must not consume the scheduled run."""
+    """Firing early -- `wake fire` -- must not consume the scheduled run.
+
+    The period has to be short enough that the anchor's grid has slots between
+    `now` and `at`: with a day-long period the arithmetic happens to return the
+    anchor anyway, so a test using one asserts nothing. Here the grid offers
+    520, and pulling the schedule back to it would be wrong -- firing by hand
+    records a run, it does not move the timer earlier.
+    """
+    assert next_occurrence(1000.0, 60.0, now=500.0) == 1000.0
     assert next_occurrence(1000.0, 86400.0, now=500.0) == 1000.0
 
 

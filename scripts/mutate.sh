@@ -55,3 +55,21 @@ run_one src/wake/syncclient.py "    pushed = push(db, config)
     pulled = pull(db, config)" "    pulled = pull(db, config)
     pushed = push(db, config)" "sync pulls before it pushes"
 run_one src/wake/syncclient.py "        db.mark_pushed(task.id, task.rev)" "        pass" "push never acknowledges a row"
+
+echo "--- recurrence ---"
+run_one src/wake/whenspec.py "MIN_REPEAT_SECONDS = 60.0" "MIN_REPEAT_SECONDS = 1.0" "the 60s floor on --every"
+run_one src/wake/whenspec.py "    if at > now:
+        return at" "    if False:
+        return at" "next_occurrence consumes a future run (wake fire)"
+run_one src/wake/whenspec.py "math.floor((now - at) / repeat_seconds) + 1" "math.floor((now - at) / repeat_seconds)" "next occurrence lands on now, not after it"
+run_one src/wake/whenspec.py "return at + (math.floor((now - at) / repeat_seconds) + 1) * repeat_seconds" "return now + repeat_seconds" "phase drifts: period added to now, not the anchor"
+run_one src/wake/server.py "    if task.repeat_seconds:
+        return db.mark_recurred(" "    if False:
+        return db.mark_recurred(" "recurring tasks fall through to fired/failed"
+run_one src/wake/server.py "    if error is not None:
+        return db.mark_failed(task.id, error, expect_rev=expect_rev)" "    if error is not None:
+        return db.mark_recurred(task.id, at=task.at, fired_at=moment, error=error, expect_rev=expect_rev)" "a failed one-shot re-arms instead of failing"
+run_one src/wake/server.py "        return (\"\", config.origin)" "        return (\"\",)" "server stops answering to its own name"
+run_one src/wake/server.py "    return (config.origin,)" "    return (\"\",)" "a device claims the server's tasks"
+run_one src/wake/db.py "        wanted = owners or (\"\",)" "        wanted = (\"\",)" "due ignores the owners it was given"
+run_one src/wake/syncclient.py "        if task.repeat_seconds and stored.get(\"repeat_seconds\") is None:" "        if False:" "old-server field drop goes unreported"

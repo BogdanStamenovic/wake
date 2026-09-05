@@ -503,8 +503,15 @@ compares a value against the constant that produced it passes whatever that
 constant becomes — `assert config.port == DEFAULT_PORT` is happy with any
 port. Seven of wake's checks were that shape until it said so, among them the
 default bind address, both loop periods, and the last-write-wins tie-break.
-All seventeen mutations are caught now; run it after changing a tuning value
+All twenty-seven mutations are caught now; run it after changing a tuning value
 or a comparison.
+
+The recurrence checks earned their place immediately. `next_occurrence` returns
+the anchor early when the anchor is still in the future, and the test pinning
+that used a one-day period — for which the general arithmetic returns the anchor
+anyway, so deleting the early return passed. It only fails with a period short
+enough that the anchor's grid has slots in between, which is the shape of every
+test that compares a value against the thing that produced it.
 
 Two of them came from a different question, worth asking separately: *which
 docstrings explain why something matters, and assert nothing?* Both of this
