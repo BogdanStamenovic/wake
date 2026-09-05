@@ -27,10 +27,10 @@ from .backends import BackendError
 from .config import ConfigError, WakeConfig, load_config
 from .db import WakeDB, WakeError
 from .models import BACKENDS, Task
-from .server import WakeServer, finish_power, run_once
+from .server import WakeServer, finish_power, record_run, run_once
 from .syncclient import SyncError
 from .syncclient import sync as sync_now
-from .whenspec import WhenError, parse_when
+from .whenspec import WhenError, format_every, parse_every, parse_when
 
 Logger = Callable[[str], None]
 
@@ -55,11 +55,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
     add = sub.add_parser("add", help="schedule a new wake task")
     add.add_argument("--at", required=True, help="epoch seconds, ISO 8601, or +<N>[s|m|h|d]")
+    add.add_argument(
+        "--every",
+        help="repeat forever on this period: <N>[s|m|h|d|w], bare seconds, or "
+             "hourly/daily/weekly. --at is the anchor, so --at 06:00 --every 1d "
+             "is every day at 06:00",
+    )
     add.add_argument("--task", required=True, help="what to run when it fires")
     add.add_argument("--backend", default="shell", choices=BACKENDS)
     add.add_argument("--target", help="backend-specific target (MAC for wol, agent for notify)")
-    add.add_argument("--on", dest="owner", help="origin name of the machine that fires it "
-                                                "(default: the server)")
+    add.add_argument(
+        "--on", dest="owner",
+        help="ORIGIN name of the machine that fires it; must match that machine's "
+             "ORIGIN exactly, and the server answers to its own name as well as to "
+             "the default (default: the server)",
+    )
     add.add_argument(
         "--then", dest="then_do", default="", choices=("poweroff",),
         help="what to do to this machine once the task finishes",
@@ -75,7 +85,9 @@ def _build_parser() -> argparse.ArgumentParser:
     listing.add_argument("--all", action="store_true", help="include fired/cancelled/failed")
     listing.add_argument("--json", action="store_true", help="emit JSON instead of a table")
 
-    cancel = sub.add_parser("cancel", help="cancel a pending task")
+    cancel = sub.add_parser(
+        "cancel", help="cancel a pending task, and stop a recurring one for good"
+    )
     cancel.add_argument("id")
 
     sub.add_parser("sync", help="push local tasks up and pull the server's view down, once")
@@ -99,20 +111,29 @@ def _open_db(config: WakeConfig) -> WakeDB:
     return WakeDB(config.db_path)
 
 
+# `every` and `on` are columns rather than JSON-only fields because both are
+# invisible failure modes otherwise: a recurrence that silently did not take,
+# and a task addressed to a machine that does not answer to that name.
+_COLUMNS = {"id": 8, "at": 24, "status": 9, "backend": 8, "every": 6, "on": 10}
+
+
 def _format_table(rows: list[Task]) -> str:
     if not rows:
         return "no tasks"
-    widths = {"id": 8, "at": 24, "status": 9, "backend": 8}
-    header = (
-        f"{'id':<{widths['id']}}  {'at':<{widths['at']}}  {'status':<{widths['status']}}  "
-        f"{'backend':<{widths['backend']}}  task"
-    )
+    header = "  ".join(f"{name:<{width}}" for name, width in _COLUMNS.items()) + "  task"
     lines = [header]
     for row in rows:
-        at_str = datetime.fromtimestamp(row.at, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        cells = {
+            "id": row.id[:8],
+            "at": datetime.fromtimestamp(row.at, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "status": row.status,
+            "backend": row.backend,
+            "every": format_every(row.repeat_seconds),
+            "on": row.owner or "server",
+        }
         lines.append(
-            f"{row.id[:8]:<{widths['id']}}  {at_str:<{widths['at']}}  "
-            f"{row.status:<{widths['status']}}  {row.backend:<{widths['backend']}}  {row.task}"
+            "  ".join(f"{cells[name]:<{width}}" for name, width in _COLUMNS.items())
+            + f"  {row.task}"
         )
     return "\n".join(lines)
 
@@ -196,11 +217,32 @@ def _autosync(config: WakeConfig, report: Logger) -> None:
 
 def _cmd_add(args: argparse.Namespace, config: WakeConfig, vlog: Logger) -> int:
     at = parse_when(args.at)
+    repeat = parse_every(args.every) if args.every else None
+    if repeat and args.backend == "rtcwake":
+        # rtcwake never travels through the firing loop -- it is armed on this
+        # machine at add time and stored `armed` -- so there is nothing to
+        # re-arm it, and a --every here would look accepted and do nothing.
+        raise WakeError(
+            "--every does not apply to the rtcwake backend: an rtc alarm is armed "
+            "once, here, and no scheduler ever sees the task again"
+        )
+    target = args.target
+    if args.backend == "wol" and not target:
+        # Resolved here, not at fire time, so the row carries a concrete MAC:
+        # the machine that sends the packet is not the machine whose address it
+        # is, and it has no way to look the other one's config up.
+        if not config.mac:
+            raise WakeError(
+                "wol needs a MAC: pass --target, or set MAC in the config "
+                "(deploy/install.sh asks for it)"
+            )
+        target = config.mac
     with _open_db(config) as db:
         task = db.add(
-            task=args.task, at=at, backend=args.backend, target=args.target,
+            task=args.task, at=at, backend=args.backend, target=target,
             origin=config.origin, owner=args.owner or "", id=args.id,
             then_do=args.then_do, timeout_seconds=args.timeout,
+            repeat_seconds=repeat,
         )
         if args.backend == "rtcwake":
             # Armed here and now, on this machine: nothing else can reach a
@@ -227,7 +269,10 @@ def _cmd_list(args: argparse.Namespace, config: WakeConfig) -> int:
 def _cmd_cancel(args: argparse.Namespace, config: WakeConfig, log: Logger) -> int:
     with _open_db(config) as db:
         task = db.cancel(args.id)
-    log(f"cancelled {task.id}")
+    if task.repeat_seconds:
+        log(f"cancelled {task.id}; it will not recur again")
+    else:
+        log(f"cancelled {task.id}")
     _autosync(config, log)
     return 0
 
@@ -249,6 +294,13 @@ def _cmd_agent(args: argparse.Namespace, config: WakeConfig, log: Logger) -> int
     reconciling does not want to hammer the server every few seconds.
     """
     stop = _stop_event()
+    if config.role == "server":
+        # Both loops would claim the same rows -- the server owns its own
+        # ORIGIN as well as "" -- and each would run the command.
+        log(
+            "wake agent: warning: ROLE=server, so `wake serve` already fires these "
+            "tasks; running both on one machine fires each task twice"
+        )
     with _open_db(config) as db:
         log(
             f"wake agent: origin {config.origin}, firing every {config.poll_seconds}s, "
@@ -273,7 +325,7 @@ def _cmd_agent(args: argparse.Namespace, config: WakeConfig, log: Logger) -> int
                     if pushed or pulled:
                         log(f"wake agent: pushed {pushed}, pulled {pulled}")
                 next_sync = time.monotonic() + config.sync_seconds
-            for task in run_once(db, config, owner=config.origin):
+            for task in run_once(db, config):
                 log(f"wake agent: {task.id[:8]} ({task.backend}) fired")
             if args.once:
                 break
@@ -321,15 +373,23 @@ def _cmd_fire(args: argparse.Namespace, config: WakeConfig, log: Logger) -> int:
             log(f"armed rtcwake for {task.id}")
             return 0
         before = task.rev
+        moment = time.time()
         try:
             backends.fire(task, config)
         except BackendError as exc:
-            if db.mark_failed(task.id, str(exc), expect_rev=before) is None:
+            if record_run(db, task, error=str(exc), expect_rev=before, moment=moment) is None:
                 log(f"wake: {task.id} re-armed itself while failing; leaving it scheduled")
             print(f"wake: error: {exc}", file=sys.stderr)
             return 1
-        if db.mark_fired(task.id, expect_rev=before) is None:
+        settled = record_run(db, task, error=None, expect_rev=before, moment=moment)
+        if settled is None:
             log(f"fired {task.id}; it re-armed itself, leaving it scheduled")
+        elif task.repeat_seconds:
+            # `wake fire` runs a task ahead of its schedule, so next_occurrence
+            # normally hands back the same `at` it already had: firing by hand
+            # records the run, it does not consume the scheduled one.
+            when = datetime.fromtimestamp(settled.at, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+            log(f"fired {task.id}; next occurrence {when}")
         else:
             log(f"fired {task.id}")
         if task.then_do:

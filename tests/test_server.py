@@ -13,15 +13,21 @@ from typing import Any
 
 import pytest
 
+from wake import power
 from wake.config import WakeConfig
 from wake.db import WakeDB
-from wake.server import ApiError, WakeServer, WakeService, run_once
+from wake.server import ApiError, WakeServer, WakeService, owned_by, run_once
 
 
 @pytest.fixture
 def service(db: WakeDB) -> WakeService:
     return WakeService(db, WakeConfig(role="server", origin="server"))
 
+
+# The firing loop under test is the *server's*, so it gets a server config: a
+# server owns both "" and its own ORIGIN, and running these against the default
+# device role would exercise a machine that owns neither.
+SERVER = WakeConfig(role="server", origin="hub")
 
 # -- run_once ---------------------------------------------------------------
 
@@ -31,7 +37,7 @@ def test_run_once_fires_a_due_task_and_marks_it(db: WakeDB, tmp_path: Path) -> N
     task = db.add(
         task=f"touch {marker}", at=100.0, backend="shell", target=None, origin="server"
     )
-    handled = run_once(db, WakeConfig(), now=500.0)
+    handled = run_once(db, SERVER, now=500.0)
 
     assert [t.id for t in handled] == [task.id]
     assert marker.exists()
@@ -43,12 +49,12 @@ def test_run_once_fires_a_due_task_and_marks_it(db: WakeDB, tmp_path: Path) -> N
 
 def test_run_once_leaves_a_task_whose_time_has_not_come(db: WakeDB) -> None:
     db.add(task="true", at=9999.0, backend="shell", target=None, origin="server")
-    assert run_once(db, WakeConfig(), now=500.0) == []
+    assert run_once(db, SERVER, now=500.0) == []
 
 
 def test_run_once_records_a_failure_instead_of_raising(db: WakeDB) -> None:
     task = db.add(task="exit 9", at=1.0, backend="shell", target=None, origin="server")
-    run_once(db, WakeConfig(), now=500.0)
+    run_once(db, SERVER, now=500.0)
     stored = db.get(task.id)
     assert stored is not None
     assert stored.status == "failed"
@@ -59,7 +65,7 @@ def test_one_failing_task_does_not_stop_the_others(db: WakeDB, tmp_path: Path) -
     marker = tmp_path / "later"
     db.add(task="exit 1", at=1.0, backend="shell", target=None, origin="server")
     db.add(task=f"touch {marker}", at=2.0, backend="shell", target=None, origin="server")
-    run_once(db, WakeConfig(), now=500.0)
+    run_once(db, SERVER, now=500.0)
     assert marker.exists()
 
 
@@ -68,8 +74,8 @@ def test_a_fired_task_is_not_fired_again(db: WakeDB, tmp_path: Path) -> None:
     db.add(
         task=f"echo x >> {counter}", at=1.0, backend="shell", target=None, origin="server"
     )
-    run_once(db, WakeConfig(), now=500.0)
-    run_once(db, WakeConfig(), now=500.0)
+    run_once(db, SERVER, now=500.0)
+    run_once(db, SERVER, now=500.0)
     assert counter.read_text() == "x\n"
 
 
@@ -79,7 +85,7 @@ def test_the_server_ignores_device_owned_tasks(db: WakeDB, tmp_path: Path) -> No
         task=f"touch {marker}", at=1.0, backend="shell", target=None,
         origin="laptop", owner="laptop",
     )
-    assert run_once(db, WakeConfig(), now=500.0) == []
+    assert run_once(db, SERVER, now=500.0) == []
     assert not marker.exists()
 
 
@@ -281,7 +287,7 @@ def test_a_task_that_rearms_itself_stays_scheduled(
     monkeypatch.setitem(backends.FIRE_BACKENDS, "shell", rearming)
     db.add(task="track run abc", at=1.0, backend="shell", target=None, origin="server")
 
-    run_once(db, WakeConfig(), now=500.0)
+    run_once(db, SERVER, now=500.0)
     stored = db.get(db.tasks(include_all=True)[0].id)
     assert stored is not None
     assert stored.status == "pending", "the assignment must survive its own run"
@@ -303,7 +309,7 @@ def test_a_task_that_rearms_a_different_id_is_still_marked_fired(
         task="x", at=1.0, backend="shell", target=None, origin="server", id="first"
     )
 
-    run_once(db, WakeConfig(), now=500.0)
+    run_once(db, SERVER, now=500.0)
     stored = db.get(original.id)
     assert stored is not None
     assert stored.status == "fired"
@@ -346,7 +352,7 @@ def test_a_real_subprocess_rearming_the_same_database_is_respected(
     )
     assert proof.returncode == 0, "the child needs wake importable"
 
-    run_once(db, WakeConfig(), now=500.0)
+    run_once(db, SERVER, now=500.0)
     stored = db.get("recurring")
     assert stored is not None
     assert stored.status == "pending"
@@ -374,3 +380,176 @@ def test_a_thin_re_add_beats_a_row_stamped_in_the_future(
     again = service.add({"task": "track run abc", "at": 900.0, "id": "track-abc"})
     assert again["at"] == 900.0, "the re-arm must not lose to a future timestamp"
     assert again["status"] == "pending"
+
+
+# -- recurrence -------------------------------------------------------------
+
+
+def test_a_recurring_task_goes_back_to_pending_at_its_next_occurrence(
+    db: WakeDB, tmp_path: Path
+) -> None:
+    counter = tmp_path / "count"
+    db.add(
+        task=f"echo x >> {counter}", at=100.0, backend="shell", target=None,
+        origin="server", id="daily", repeat_seconds=60.0,
+    )
+    run_once(db, SERVER, now=500.0)
+
+    stored = db.get("daily")
+    assert stored is not None
+    assert stored.status == "pending", "a recurrence has no terminal state"
+    assert stored.at == 520.0
+    assert stored.fired_at == 500.0
+    assert counter.read_text() == "x\n"
+    assert len(db.tasks(include_all=True)) == 1, "never a second row racing the first"
+
+
+def test_a_recurring_task_fires_again_on_the_next_pass(db: WakeDB, tmp_path: Path) -> None:
+    counter = tmp_path / "count"
+    db.add(
+        task=f"echo x >> {counter}", at=100.0, backend="shell", target=None,
+        origin="server", id="daily", repeat_seconds=60.0,
+    )
+    run_once(db, SERVER, now=500.0)
+    run_once(db, SERVER, now=500.0)  # the next occurrence is not due yet
+    run_once(db, SERVER, now=600.0)
+    assert counter.read_text() == "x\nx\n"
+
+
+def test_three_days_off_is_one_catch_up_run_not_three(db: WakeDB, tmp_path: Path) -> None:
+    """The documented missed-occurrence policy, at the loop rather than the maths."""
+    counter = tmp_path / "count"
+    db.add(
+        task=f"echo x >> {counter}", at=1000.0, backend="shell", target=None,
+        origin="server", id="daily", repeat_seconds=86400.0,
+    )
+    back_up = 1000.0 + 3 * 86400.0 + 3600.0
+    run_once(db, SERVER, now=back_up)
+    run_once(db, SERVER, now=back_up)
+
+    assert counter.read_text() == "x\n"
+    stored = db.get("daily")
+    assert stored is not None
+    assert stored.at == 1000.0 + 4 * 86400.0, "back on the anchor's phase"
+
+
+def test_a_failing_recurring_task_still_runs_tomorrow(db: WakeDB) -> None:
+    """Stopping the schedule on the first bad night is the silent failure to avoid."""
+    db.add(
+        task="exit 9", at=100.0, backend="shell", target=None, origin="server",
+        id="daily", repeat_seconds=60.0,
+    )
+    run_once(db, SERVER, now=500.0)
+    stored = db.get("daily")
+    assert stored is not None
+    assert stored.status == "pending"
+    assert stored.at == 520.0
+    assert "exited 9" in (stored.error or ""), "the bad run is recorded, not discarded"
+
+
+def test_a_cancelled_recurring_task_stops_for_good(db: WakeDB, tmp_path: Path) -> None:
+    counter = tmp_path / "count"
+    db.add(
+        task=f"echo x >> {counter}", at=100.0, backend="shell", target=None,
+        origin="server", id="daily", repeat_seconds=60.0,
+    )
+    db.cancel("daily")
+    assert run_once(db, SERVER, now=99999.0) == []
+    assert not counter.exists()
+
+
+def test_a_recurring_task_cancelled_mid_run_is_not_revived(
+    db: WakeDB, tmp_path: Path
+) -> None:
+    """The command cancels its own row while wake is still holding it open."""
+    import sys
+    import textwrap
+
+    marker = tmp_path / "cancelled"
+    script = tmp_path / "cancel.py"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+            from wake.db import WakeDB
+            with WakeDB({str(db.path)!r}) as handle:
+                handle.cancel("daily")
+            open({str(marker)!r}, "w").close()
+            """
+        )
+    )
+    db.add(
+        task=f"{sys.executable} {script}", at=100.0, backend="shell", target=None,
+        origin="server", id="daily", repeat_seconds=60.0,
+    )
+    run_once(db, SERVER, now=500.0)
+
+    assert marker.exists(), "the command has to have actually run"
+    stored = db.get("daily")
+    assert stored is not None
+    assert stored.status == "cancelled"
+
+
+def test_a_recurring_task_arms_the_rtc_for_its_own_next_occurrence(
+    db: WakeDB, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Recurrence and `--then poweroff` compose: tomorrow's run is the next wake."""
+    armed: list[float] = []
+    monkeypatch.setattr("wake.power.presence", lambda **_: _Clear())
+    monkeypatch.setattr("wake.power.arm_wakealarm", lambda when: armed.append(when))
+    monkeypatch.setattr("wake.power.suppress_watchdog", lambda: False)
+    monkeypatch.setattr("wake.power.power_off", lambda: None)
+
+    at = time.time() + 10
+    db.add(
+        task="true", at=at, backend="shell", target=None, origin="server",
+        id="daily", repeat_seconds=86400.0, then_do="poweroff",
+    )
+    run_once(db, SERVER, now=at + 1)
+
+    stored = db.get("daily")
+    assert stored is not None and stored.at == at + 86400.0
+    assert armed == [stored.at - power.WAKE_LEAD_SECONDS]
+
+
+class _Clear:
+    clear = True
+
+    def why(self) -> str:
+        return ""
+
+
+# -- who fires it -----------------------------------------------------------
+
+
+def test_the_server_fires_a_task_addressed_to_it_by_name(
+    db: WakeDB, tmp_path: Path
+) -> None:
+    """`--on <the server>` used to produce a row nothing would ever fire."""
+    marker = tmp_path / "by-name"
+    db.add(
+        task=f"touch {marker}", at=1.0, backend="shell", target=None,
+        origin="hub", owner="hub",
+    )
+    assert len(run_once(db, SERVER, now=500.0)) == 1
+    assert marker.exists()
+
+
+def test_a_device_fires_only_its_own_tasks(db: WakeDB, tmp_path: Path) -> None:
+    """And in particular not the server's, which is why the sets stay disjoint."""
+    laptop = WakeConfig(role="device", origin="laptop")
+    mine = tmp_path / "mine"
+    theirs = tmp_path / "theirs"
+    db.add(
+        task=f"touch {mine}", at=1.0, backend="shell", target=None,
+        origin="laptop", owner="laptop",
+    )
+    db.add(task=f"touch {theirs}", at=1.0, backend="shell", target=None, origin="hub")
+
+    assert len(run_once(db, laptop, now=500.0)) == 1
+    assert mine.exists()
+    assert not theirs.exists()
+
+
+def test_owned_by_is_the_whole_rule() -> None:
+    assert owned_by(WakeConfig(role="server", origin="hub")) == ("", "hub")
+    assert owned_by(WakeConfig(role="device", origin="laptop")) == ("laptop",)

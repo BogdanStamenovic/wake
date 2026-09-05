@@ -51,7 +51,8 @@ class WakeConfig:
     poweroff_allow_agents: str = ""  # agent --name values that never block a poweroff
     poweroff_allow_match: str = ""  # regex; agent command lines matching it are furniture
     wol_broadcast: str = ""  # override the 255.255.255.255 default for the wol backend
-    hotline_ios_url: str = ""  # e.g. http://100.72.2.62:8789, used by the notify backend
+    mac: str = ""  # this machine's MAC: what `wake add --backend wol` targets by default
+    hotline_ios_url: str = ""  # e.g. http://192.0.2.10:8789, used by the notify backend
     hotline_ios_key: str = ""
 
     def __post_init__(self) -> None:
@@ -114,6 +115,8 @@ def load_config(path: Path | None = None) -> WakeConfig:
         config.poweroff_allow_match = values["POWEROFF_ALLOW_MATCH"]
     if "WOL_BROADCAST" in values:
         config.wol_broadcast = values["WOL_BROADCAST"]
+    if "MAC" in values:
+        config.mac = values["MAC"]
     if "HOTLINE_IOS_URL" in values:
         config.hotline_ios_url = values["HOTLINE_IOS_URL"].rstrip("/")
     if "HOTLINE_IOS_KEY" in values:

@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     owner TEXT NOT NULL DEFAULT '',
     then_do TEXT NOT NULL DEFAULT '',
     timeout_seconds REAL,
+    repeat_seconds REAL,
     pushed_rev INTEGER NOT NULL DEFAULT 0,
     fired_at REAL,
     error TEXT
@@ -65,6 +66,7 @@ _MIGRATIONS = {
     "pushed_rev": "ALTER TABLE tasks ADD COLUMN pushed_rev INTEGER NOT NULL DEFAULT 0",
     "then_do": "ALTER TABLE tasks ADD COLUMN then_do TEXT NOT NULL DEFAULT ''",
     "timeout_seconds": "ALTER TABLE tasks ADD COLUMN timeout_seconds REAL",
+    "repeat_seconds": "ALTER TABLE tasks ADD COLUMN repeat_seconds REAL",
 }
 
 
@@ -130,6 +132,7 @@ class WakeDB:
         owner: str = "",
         then_do: str = "",
         timeout_seconds: float | None = None,
+        repeat_seconds: float | None = None,
         id: str | None = None,
         status: str = "pending",
     ) -> Task:
@@ -152,6 +155,7 @@ class WakeDB:
                     id, task=task, at=at, backend=backend, target=target,
                     origin=origin, owner=owner, status=status,
                     then_do=then_do, timeout_seconds=timeout_seconds,
+                    repeat_seconds=repeat_seconds,
                 )
             now = time.time()
             row = Task(
@@ -168,12 +172,13 @@ class WakeDB:
                 owner=owner,
                 then_do=then_do,
                 timeout_seconds=timeout_seconds,
+                repeat_seconds=repeat_seconds,
             )
             self._conn.execute(
                 "INSERT INTO tasks "
                 "(id, task, at, backend, target, status, origin, created_at, updated_at, rev, "
-                " owner, then_do, timeout_seconds, pushed_rev, fired_at, error) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " owner, then_do, timeout_seconds, repeat_seconds, pushed_rev, fired_at, error) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (*_columns(row), 0, row.fired_at, row.error),
             )
             self._conn.commit()
@@ -191,6 +196,7 @@ class WakeDB:
         owner: str = "",
         then_do: str = "",
         timeout_seconds: float | None = None,
+        repeat_seconds: float | None = None,
         status: str = "pending",
     ) -> Task:
         """Point an existing task at a new time, unconditionally.
@@ -216,10 +222,10 @@ class WakeDB:
             rev = self._next_rev()
             self._conn.execute(
                 "UPDATE tasks SET task=?, at=?, backend=?, target=?, status=?, origin=?, "
-                "owner=?, then_do=?, timeout_seconds=?, updated_at=?, rev=?, "
+                "owner=?, then_do=?, timeout_seconds=?, repeat_seconds=?, updated_at=?, rev=?, "
                 "fired_at=NULL, error=NULL WHERE id=?",
                 (task, at, backend, target, status, origin, owner, then_do,
-                 timeout_seconds, now, rev, id),
+                 timeout_seconds, repeat_seconds, now, rev, id),
             )
             self._conn.commit()
             updated = self.get(id)
@@ -253,13 +259,14 @@ class WakeDB:
             self._conn.execute(
                 "INSERT INTO tasks "
                 "(id, task, at, backend, target, status, origin, created_at, updated_at, rev, "
-                " owner, then_do, timeout_seconds, pushed_rev, fired_at, error) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                " owner, then_do, timeout_seconds, repeat_seconds, pushed_rev, fired_at, error) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "task=excluded.task, at=excluded.at, backend=excluded.backend, "
                 "target=excluded.target, status=excluded.status, updated_at=excluded.updated_at, "
                 "rev=excluded.rev, owner=excluded.owner, then_do=excluded.then_do, "
-                "timeout_seconds=excluded.timeout_seconds, pushed_rev=excluded.pushed_rev, "
+                "timeout_seconds=excluded.timeout_seconds, "
+                "repeat_seconds=excluded.repeat_seconds, pushed_rev=excluded.pushed_rev, "
                 "fired_at=excluded.fired_at, error=excluded.error",
                 (*_columns(merged), rev, merged.fired_at, merged.error),
             )
@@ -341,6 +348,55 @@ class WakeDB:
         """
         return self._update_status(id, status="failed", error=error, expect_rev=expect_rev)
 
+    def mark_recurred(
+        self,
+        id: str,
+        *,
+        at: float,
+        fired_at: float,
+        error: str | None = None,
+        expect_rev: int | None = None,
+    ) -> Task | None:
+        """Move a recurring task on to its next occurrence.
+
+        The row goes back to ``pending`` at a new ``at`` instead of reaching
+        ``fired``: a recurrence has no terminal state, and re-using the one row
+        is the same guarantee an explicit ``--id`` gives a caller that re-adds
+        its own timer -- there is never a second row racing the first, and the
+        id someone wrote down keeps meaning the same schedule forever.
+
+        ``fired_at`` and ``error`` are *kept*, and describe the run that just
+        finished. That is the opposite of ``rearm``, which clears both, and the
+        difference is who is writing: an operator pointing a timer at a new
+        time is making no claim about the last run, whereas here wake is the
+        thing that just ran it. A pending recurring row that cannot say when it
+        last fired, or why it failed, leaves the journal as the only record of
+        whether a nightly job has been working -- and a journal is not where
+        anyone looks for that.
+
+        Compare-and-set on ``expect_rev`` for the same reasons as
+        ``mark_fired``, plus one more that only recurrence introduces: a
+        ``cancel`` landing while the command ran must stay cancelled. Without
+        the check this would write ``pending`` back over it and the task would
+        keep firing after an operator stopped it.
+        """
+        with self._lock:
+            existing = self.get(id)
+            if existing is None:
+                raise WakeError(f"no such task: {id}")
+            if expect_rev is not None and existing.rev != expect_rev:
+                return None
+            rev = self._next_rev()
+            self._conn.execute(
+                "UPDATE tasks SET status='pending', at=?, updated_at=?, rev=?, "
+                "fired_at=?, error=? WHERE id=?",
+                (at, time.time(), rev, fired_at, error, id),
+            )
+            self._conn.commit()
+            updated = self.get(id)
+            assert updated is not None
+            return updated
+
     def mark_pushed(self, id: str, rev: int) -> None:
         """Record that the server has seen this row as of local revision ``rev``.
 
@@ -390,19 +446,27 @@ class WakeDB:
             ).fetchall()
             return [_row_to_task(row) for row in rows]
 
-    def due(self, owner: str = "", *, now: float | None = None) -> list[Task]:
-        """Pending tasks owned by ``owner`` whose time has come.
+    def due(self, *owners: str, now: float | None = None) -> list[Task]:
+        """Pending tasks owned by any of ``owners`` whose time has come.
+
+        Several names rather than one because a machine can legitimately answer
+        to more than one: the server owns both "" and its own ORIGIN, since
+        ``wake add --on <the server>`` writes the latter -- see
+        ``server.owned_by``. No owners at all means "", the server, which is
+        also what ``add`` writes when nobody passed ``--on``.
 
         ``rtcwake`` is excluded: it is armed on its own device at ``add`` time
         (see backends.py) and a suspended machine cannot run this loop anyway,
         so a pending ``rtcwake`` row is a failed arming, not work to pick up.
         """
+        wanted = owners or ("",)
         with self._lock:
             cutoff = time.time() if now is None else now
+            placeholders = ",".join("?" * len(wanted))
             rows = self._conn.execute(
                 "SELECT * FROM tasks WHERE status = 'pending' AND at <= ? "
-                "AND backend != 'rtcwake' AND owner = ? ORDER BY at",
-                (cutoff, owner),
+                f"AND backend != 'rtcwake' AND owner IN ({placeholders}) ORDER BY at",
+                (cutoff, *wanted),
             ).fetchall()
             return [_row_to_task(row) for row in rows]
 
@@ -431,7 +495,7 @@ class WakeDB:
 
 
 def _columns(row: Task) -> tuple[object, ...]:
-    """The first thirteen INSERT parameters, in schema order."""
+    """The first fourteen INSERT parameters, in schema order."""
     return (
         row.id,
         row.task,
@@ -446,6 +510,7 @@ def _columns(row: Task) -> tuple[object, ...]:
         row.owner,
         row.then_do,
         row.timeout_seconds,
+        row.repeat_seconds,
     )
 
 
@@ -464,6 +529,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         owner=row["owner"],
         then_do=row["then_do"],
         timeout_seconds=row["timeout_seconds"],
+        repeat_seconds=row["repeat_seconds"],
         fired_at=row["fired_at"],
         error=row["error"],
     )

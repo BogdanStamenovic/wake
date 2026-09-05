@@ -267,3 +267,84 @@ def test_firing_a_self_rearming_task_leaves_it_scheduled(
     main(["list", "--json"])
     rows = json.loads(capsys.readouterr().out)
     assert [r["status"] for r in rows] == ["pending"], "the timer must survive"
+
+
+# -- --every ----------------------------------------------------------------
+
+
+def test_add_stores_a_period(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["add", "--at", "+1h", "--every", "daily", "--task", "x"]) == 0
+    capsys.readouterr()
+    assert main(["list", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert rows[0]["repeat_seconds"] == 86400.0
+
+
+def test_add_rejects_a_period_it_cannot_parse(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["add", "--at", "+1h", "--every", "fortnightly", "--task", "x"]) == 1
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert "wake: error" in out.err
+
+
+def test_add_refuses_a_period_on_rtcwake(capsys: pytest.CaptureFixture[str]) -> None:
+    """rtcwake is armed here and now; no scheduler ever sees it again to re-arm."""
+    code = main(
+        ["add", "--at", "+1h", "--every", "1d", "--backend", "rtcwake", "--task", "x"]
+    )
+    assert code == 1
+    assert "rtcwake" in capsys.readouterr().err
+
+
+def test_list_shows_the_period_and_the_owner(capsys: pytest.CaptureFixture[str]) -> None:
+    """Both are silent failure modes when invisible."""
+    main(["add", "--at", "+1h", "--every", "12h", "--on", "laptop", "--task", "x"])
+    capsys.readouterr()
+    assert main(["list"]) == 0
+    out = capsys.readouterr().out
+    assert "every" in out and "12h" in out
+    assert "on" in out and "laptop" in out
+
+
+def test_list_names_the_server_for_an_unassigned_task(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    main(["add", "--at", "+1h", "--task", "x"])
+    capsys.readouterr()
+    main(["list"])
+    assert "server" in capsys.readouterr().out
+
+
+# -- the wol default target -------------------------------------------------
+
+
+def test_wol_falls_back_to_the_configured_mac(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resolved at add time so the row carries a MAC the firing machine can use."""
+    monkeypatch.setenv("WAKE_MAC", "00:00:5e:00:53:2a")
+    assert main(["add", "--at", "+1h", "--backend", "wol", "--task", "wol"]) == 0
+    capsys.readouterr()
+    main(["list", "--json"])
+    rows = json.loads(capsys.readouterr().out)
+    assert rows[0]["target"] == "00:00:5e:00:53:2a"
+
+
+def test_an_explicit_target_still_wins(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WAKE_MAC", "00:00:5e:00:53:2a")
+    main([
+        "add", "--at", "+1h", "--backend", "wol",
+        "--target", "00:00:5e:00:53:ff", "--task", "wol",
+    ])
+    capsys.readouterr()
+    main(["list", "--json"])
+    assert json.loads(capsys.readouterr().out)[0]["target"] == "00:00:5e:00:53:ff"
+
+
+def test_wol_with_no_mac_anywhere_says_where_to_put_one(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["add", "--at", "+1h", "--backend", "wol", "--task", "wol"]) == 1
+    assert "MAC" in capsys.readouterr().err

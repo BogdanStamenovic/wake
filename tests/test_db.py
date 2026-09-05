@@ -361,3 +361,87 @@ def test_a_task_due_at_exactly_now_fires(db: WakeDB) -> None:
     """The boundary: `at <= now`, not `at < now`."""
     task = _add(db, at=500.0)
     assert [t.id for t in db.due(now=500.0)] == [task.id]
+
+
+# -- recurrence -------------------------------------------------------------
+
+
+def test_a_period_survives_a_round_trip(db: WakeDB) -> None:
+    task = _add(db, repeat_seconds=86400.0)
+    stored = db.get(task.id)
+    assert stored is not None and stored.repeat_seconds == 86400.0
+
+
+def test_mark_recurred_reuses_the_row_rather_than_making_a_second(db: WakeDB) -> None:
+    task = _add(db, at=100.0, repeat_seconds=60.0)
+    moved = db.mark_recurred(task.id, at=160.0, fired_at=100.0)
+    assert moved is not None
+    assert moved.status == "pending"
+    assert moved.at == 160.0
+    assert len(db.tasks(include_all=True)) == 1
+
+
+def test_a_recurring_row_remembers_its_last_run(db: WakeDB) -> None:
+    """The opposite of `rearm`, which clears both -- here wake is what ran it."""
+    task = _add(db, at=100.0, repeat_seconds=60.0)
+    moved = db.mark_recurred(task.id, at=160.0, fired_at=101.0, error="exited 1")
+    assert moved is not None
+    assert moved.fired_at == 101.0
+    assert moved.error == "exited 1"
+    assert moved.status == "pending", "a bad night does not end the schedule"
+
+
+def test_mark_recurred_gives_way_when_the_row_moved(db: WakeDB) -> None:
+    """A cancel landing mid-run must stay cancelled, not go back to pending."""
+    task = _add(db, at=100.0, repeat_seconds=60.0)
+    db.cancel(task.id)
+    assert db.mark_recurred(task.id, at=160.0, fired_at=100.0, expect_rev=task.rev) is None
+    still = db.get(task.id)
+    assert still is not None and still.status == "cancelled"
+
+
+def test_a_cancelled_recurring_task_is_never_due_again(db: WakeDB) -> None:
+    task = _add(db, at=100.0, repeat_seconds=60.0)
+    db.cancel(task.id)
+    assert db.due(now=99999.0) == []
+
+
+def test_recurring_forward_makes_the_row_sync_again(db: WakeDB) -> None:
+    task = _add(db, at=100.0, repeat_seconds=60.0)
+    db.mark_pushed(task.id, task.rev)
+    assert db.unpushed("testbox") == []
+    db.mark_recurred(task.id, at=160.0, fired_at=100.0)
+    assert [t.id for t in db.unpushed("testbox")] == [task.id]
+
+
+def test_a_period_travels_over_the_wire(db: WakeDB) -> None:
+    task = _add(db, repeat_seconds=3600.0)
+    assert Task.from_dict(task.to_dict()).repeat_seconds == 3600.0
+
+
+def test_an_older_peer_omitting_the_period_still_parses() -> None:
+    """A device on a pre-recurrence wake pushes a dict with no such key."""
+    body = {
+        "id": "x", "task": "echo", "at": 1.0, "backend": "shell", "target": None,
+        "status": "pending", "origin": "old", "created_at": 1.0, "updated_at": 1.0,
+        "rev": 1,
+    }
+    assert Task.from_dict(body).repeat_seconds is None
+
+
+# -- who fires it -----------------------------------------------------------
+
+
+def test_due_takes_several_owner_names(db: WakeDB) -> None:
+    """The server owns "" and its own ORIGIN; both must come back in one pass."""
+    unassigned = _add(db, at=100.0)
+    by_name = _add(db, at=200.0, owner="hub")
+    _add(db, at=300.0, owner="laptop")
+    found = [t.id for t in db.due("", "hub", now=500.0)]
+    assert found == [unassigned.id, by_name.id]
+
+
+def test_no_owner_argument_still_means_the_server(db: WakeDB) -> None:
+    task = _add(db, at=100.0)
+    _add(db, at=100.0, owner="laptop")
+    assert [t.id for t in db.due(now=500.0)] == [task.id]

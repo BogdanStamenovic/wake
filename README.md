@@ -121,7 +121,8 @@ since a two-minute timer cannot honour an alarm to the second.
 ## Usage
 
 ```
-wake add --at <when> --task <cmd> [--backend shell|wol|rtcwake|notify|call]
+wake add --at <when> [--every <period>] --task <cmd>
+                                 [--backend shell|wol|rtcwake|notify|call]
                                  [--target T] [--on HOST] [--id ID]
 wake list [--all] [--json]
 wake cancel <id>
@@ -134,10 +135,11 @@ wake fire <id>
 | Option | Meaning |
 | --- | --- |
 | `--at` | Epoch seconds, ISO 8601, or a relative offset like `+30m`, `+2h`, `+1d` |
+| `--every` | Repeat forever on this period: `<N>[s|m|h|d|w]`, bare seconds, or `hourly`/`daily`/`weekly`. `--at` is the anchor — see below |
 | `--task` | For `shell`/`rtcwake`: a command; for `wol`: unused (see `--target`); for `notify`/`call`: the text |
 | `--backend` | `shell` (default), `wol`, `rtcwake`, `notify`, or `call` |
-| `--target` | Backend-specific: a MAC for `wol`, a hotline agent name for `notify`/`call` |
-| `--on` | Which machine fires it, by `ORIGIN` name. Default: the server |
+| `--target` | Backend-specific: a MAC for `wol`, a hotline agent name for `notify`/`call`. For `wol` it falls back to the configured `MAC` |
+| `--on` | Which machine fires it, by `ORIGIN` name. Default: the server, which also answers to its own `ORIGIN` |
 | `--id` | Explicit task id instead of a generated one. Re-adding an id that exists **re-arms** it — see below |
 
 Every subcommand also accepts `-v/--verbose`, `-q/--quiet`, `--version`, and
@@ -168,6 +170,13 @@ wake add --at +1h --backend notify --target hotline-80 --task "check the deploy"
 
 # Actually ring the phone at 07:00 — an alarm clock
 wake add --at 2026-09-04T07:00:00 --backend call --task "time to get up"
+
+# Every morning at 06:00 UTC, forever: wake the desktop, then run its backup
+wake add --at 2026-09-04T06:00:00Z --every 1d --backend wol --task wol
+wake add --at 2026-09-04T06:05:00Z --every daily --on desktop --task "backup.sh"
+
+# Stop it. Cancelling a recurring task is final; nothing re-arms it.
+wake cancel 3f9a2c1b
 
 wake list --json
 wake cancel 3f9a2c1b
@@ -223,14 +232,92 @@ because they are querying for different owners. `wake add --on laptop` runs on
 the laptop even though the row lives on the server too; `wake add` with no
 `--on` runs on the server even though the laptop has a copy.
 
-### Re-arming a recurring timer
+The server answers to **two** names: the empty owner that `--on`-less tasks
+get, and its own `ORIGIN`. Both mean the same machine, and treating them as one
+is load-bearing rather than a convenience — `wake add --on <the server>` is the
+obvious thing to type, and without this it produced a task that nothing would
+ever fire. The server's loop queried for `""`, no device answered to the
+server's name, and the row sat `pending` forever, failing silently at exactly
+the moment it was supposed to matter. The two sets stay disjoint from every
+device's, so nothing is claimed twice.
 
-`wake` has no recurrence syntax, so a caller that wants one owns it: it re-adds
-the next occurrence itself after observing a task fire. Passing the same
-`--id` every time is what makes that safe. Re-adding an existing id points that
-row at the new time, resets it to `pending`, and clears any previous `fired_at`
-or `error` — one row, re-armed, rather than a second row racing the first. An
-interrupted run therefore cannot leave two timers for the same thing.
+The corollary is that `ORIGIN` names must be unique across the deployment, and
+that one machine should not run both `wake serve` and `wake agent` — they would
+claim the same rows and run each command twice. `wake agent` warns when its
+config says `ROLE=server`.
+
+`wake list` prints the owner in an `on` column (`server` for the default), so a
+task addressed to a machine that does not exist is visible rather than merely
+inert.
+
+### Recurring tasks
+
+`--every` makes a task repeat forever. `--at` is the **anchor**, not just the
+first run, so "every day at 06:00 UTC" is:
+
+```
+wake add --at 2026-09-04T06:00:00Z --every 1d --task "backup.sh"
+```
+
+Periods are `<N>[s|m|h|d|w]`, bare seconds, or `hourly` / `daily` / `weekly`.
+The shortest accepted is **60 seconds** — the firing loop polls every 5s and
+each fire runs a real command with a 300s timeout, so anything sub-minute
+overlaps itself. cron's floor is a minute for the same reason; sub-minute work
+belongs in a loop inside the task's own command.
+
+A recurring task never reaches `fired` or `failed`. When it fires, the same row
+goes back to `pending` at its next occurrence — so there is never a second row
+racing the first, and an id you wrote down keeps meaning the same schedule
+forever. `fired_at` and `error` are kept on the pending row and describe the run
+that just finished, which is where you look for "did last night's backup run".
+`wake list` shows the period in an `every` column.
+
+**A failed run still re-arms.** A nightly job that errored once must still run
+tomorrow; stopping the schedule on the first bad night is precisely the silent
+failure recurrence exists to remove. The error is recorded on the row and
+logged, but it is not terminal.
+
+**`wake cancel` is.** A cancelled task is never due again, and nothing re-arms
+it. That also holds if the cancel lands while the task's command is still
+running: the re-arm is a compare-and-set against the revision read before the
+command started, so it gives way rather than writing `pending` back over the
+cancel.
+
+`--every` is refused on the `rtcwake` backend rather than accepted and ignored:
+an rtc alarm is armed once, at `add` time, on the machine you ran it on, and no
+scheduler ever sees that task again to re-arm it.
+
+#### Missed occurrences
+
+**One catch-up run, then back on schedule.** Whole periods are added to the
+*anchor*, never to "now", so a task anchored at 06:00 stays at 06:00.
+
+A machine that was off for three days comes back with one occurrence already
+overdue. It fires once — the row is `pending` with a past `at`, and that is
+what "due" means — and the next occurrence is then the first one strictly in
+the future, which skips the other two. This is the choice systemd's
+`Persistent=true` makes, for the same reasons: adding the period to `now`
+instead would let every outage permanently shift the schedule, and firing every
+missed occurrence would turn a long weekend into a burst of back-to-back runs
+at the worst possible moment.
+
+There is no grace window. A daily job that was missed by twenty hours still
+gets its one catch-up run when the machine comes up.
+
+### Re-arming a timer by hand
+
+A caller can also own its own recurrence, and some should: anything that needs
+a calendar rule rather than a fixed period, or a next time it computes itself.
+It re-adds the next occurrence after observing a task fire, passing the same
+`--id` every time. Re-adding an existing id points that row at the new time,
+resets it to `pending`, and clears any previous `fired_at` or `error` — one row,
+re-armed, rather than a second row racing the first. An interrupted run
+therefore cannot leave two timers for the same thing.
+
+The two differ in one visible way: a hand re-arm clears `fired_at` and `error`,
+and `--every` keeps them. That is about who is writing. wake is the thing that
+ran a recurring task and can say how it went; an operator pointing a timer at a
+new time is making no claim about the last run.
 
 This is deliberately *not* the same code path as sync's conflict resolution,
 though the two look alike. `merge` settles a disagreement between two peers
@@ -309,7 +396,7 @@ All POST, all JSON, all gated by `X-Wake-Key` when `API_KEY` is set.
 | Route | Body | Returns |
 | --- | --- | --- |
 | `GET /health` | — | `{ok, revision, role}` |
-| `POST /api/v1/tasks` | a task (`task` and `at` required) | the stored task |
+| `POST /api/v1/tasks` | a task (`task` and `at` required; `repeat_seconds` for recurrence) | the stored task |
 | `POST /api/v1/tasks/list` | `{since}` | `{tasks, revision}` |
 | `POST /api/v1/tasks/cancel` | `{id}` | the cancelled task |
 
@@ -383,9 +470,15 @@ while the real pair disagreed.
 - Devices poll. The server has no way to push a new task down to a device, so a
   task added on the server for a device fires no earlier than that device's
   next sync.
-- `wake` is one-shot per task row: there is no recurrence syntax. A caller that
-  wants a recurring wakeup re-adds the next occurrence itself after observing a
-  task fire.
+- Recurrence is a fixed **period**, not a calendar rule. `--every 1d` is exactly
+  86400 seconds from the anchor, so a task anchored to a local time shifts by an
+  hour across a DST boundary; anchor it in UTC and it never moves. Nothing
+  expresses "the first Monday of the month", or "every weekday". A caller that
+  needs one of those owns its own re-arming, as above.
+- Recurrence has no grace window and no maximum lateness. A daily task missed by
+  twenty hours still gets its catch-up run when the machine comes up, and there
+  is no way to say "skip it if it is more than an hour late".
+- The shortest period is 60 seconds. There is no sub-minute scheduling.
 - The deploy scripts are Linux-only: every unit is a systemd **user** unit
   and there are no launchd equivalents, so `ownbox.yaml` lists `linux`
   alone. On macOS the package still imports and the CLI still runs, but

@@ -321,3 +321,61 @@ def test_a_push_that_dies_halfway_resumes_rather_than_restarts(
         httpd.shutdown()
         thread.join(timeout=5)
         httpd.server_close()
+
+
+def test_a_recurring_task_pushed_up_keeps_its_period(
+    device_db: WakeDB, server_db: WakeDB, live_server: WakeConfig
+) -> None:
+    """The add route rebuilds the row by hand; every field it forgot was dropped."""
+    task = device_db.add(
+        task="morning", at=1.0, backend="shell", target=None, origin="laptop",
+        repeat_seconds=86400.0, then_do="poweroff", timeout_seconds=1200.0,
+    )
+    assert push(device_db, live_server) == 1
+    landed = server_db.get(task.id)
+    assert landed is not None
+    assert landed.repeat_seconds == 86400.0
+    assert landed.then_do == "poweroff", "a device's --then reached the server as nothing"
+    assert landed.timeout_seconds == 1200.0
+
+
+def test_a_recurrence_the_server_advanced_comes_back_down(
+    device_db: WakeDB, server_db: WakeDB, live_server: WakeConfig
+) -> None:
+    task = device_db.add(
+        task="morning", at=1.0, backend="shell", target=None, origin="laptop",
+        repeat_seconds=86400.0,
+    )
+    sync(device_db, live_server)
+    server_db.mark_recurred(task.id, at=86401.0, fired_at=1.0)
+
+    assert pull(device_db, live_server) == 1
+    local = device_db.get(task.id)
+    assert local is not None
+    assert local.at == 86401.0
+    assert local.status == "pending"
+    assert sync(device_db, live_server) == (0, 0), "and does not bounce straight back up"
+
+
+def test_a_cancel_is_not_undone_by_a_late_re_arm(
+    device_db: WakeDB, server_db: WakeDB, live_server: WakeConfig
+) -> None:
+    """The device stops a recurrence; the server's own advance must not revive it."""
+    task = device_db.add(
+        task="morning", at=1.0, backend="shell", target=None, origin="laptop",
+        repeat_seconds=86400.0,
+    )
+    sync(device_db, live_server)
+    before = server_db.get(task.id)
+    assert before is not None
+
+    device_db.cancel(task.id)
+    sync(device_db, live_server)
+    # The server was mid-run when the cancel landed: its bookkeeping is a
+    # compare-and-set against the revision it read before starting.
+    assert server_db.mark_recurred(
+        task.id, at=86401.0, fired_at=1.0, expect_rev=before.rev
+    ) is None
+
+    landed = server_db.get(task.id)
+    assert landed is not None and landed.status == "cancelled"

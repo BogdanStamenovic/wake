@@ -20,9 +20,27 @@ from . import backends, power
 from .config import WakeConfig
 from .db import WakeDB
 from .models import Task
+from .whenspec import next_occurrence
 
 LOG = logging.getLogger("wake.server")
 MAX_BODY = 1 << 20  # 1 MiB
+
+
+def _optional_float(value: object) -> float | None:
+    """Narrow one optional JSON scalar, so a sync push does not lose the field.
+
+    Every field this route forgot to copy off the body was silently dropped on
+    the way through: a device pushing `--then poweroff` reached the server as a
+    task that would never power anything off.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, str)):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
 
 
 class ApiError(Exception):
@@ -93,8 +111,11 @@ class WakeService:
                     updated_at=float(updated_at) if updated_at is not None else time.time(),
                     rev=0,
                     owner=owner,
-                    fired_at=body.get("fired_at"),
-                    error=body.get("error"),
+                    then_do=str(body.get("then_do") or ""),
+                    timeout_seconds=_optional_float(body.get("timeout_seconds")),
+                    repeat_seconds=_optional_float(body.get("repeat_seconds")),
+                    fired_at=_optional_float(body.get("fired_at")),
+                    error=str(body["error"]) if body.get("error") is not None else None,
                 )
                 row = self.db.merge(incoming)
             else:
@@ -130,18 +151,65 @@ class WakeService:
         return {"ok": True, "revision": self.db.revision(), "role": self.config.role}
 
 
-def run_once(
-    db: WakeDB, config: WakeConfig, *, owner: str = "", now: float | None = None
-) -> list[Task]:
-    """Fire every due task belonging to ``owner`` once. Returns the tasks it acted on.
+def owned_by(config: WakeConfig) -> tuple[str, ...]:
+    """Every ``owner`` value that means "this machine".
 
-    ``owner`` is the whole scheduling rule: the server runs with ``""`` and
-    fires unassigned tasks, a device runs with its own origin and fires only
-    the tasks addressed to it. No task is therefore claimed twice, without any
-    lease or lock crossing the network.
+    A device answers to its own ORIGIN and nothing else. The server answers to
+    two names: ``""``, which ``add`` writes when nobody passed ``--on``, and its
+    own ORIGIN, which is exactly what ``--on <the server>`` writes.
+
+    Treating those two as one machine is not a convenience. Without it,
+    ``wake add --on <the server>`` produces a task nothing will ever fire: the
+    server's loop queries for ``""`` and no device answers to the server's
+    name, so the row sits ``pending`` forever and fails silently at the moment
+    it was supposed to matter. The two sets stay disjoint from every device's,
+    so nothing is claimed twice.
     """
+    if config.role == "server":
+        return ("", config.origin)
+    return (config.origin,)
+
+
+def record_run(
+    db: WakeDB, task: Task, *, error: str | None, expect_rev: int, moment: float
+) -> Task | None:
+    """Write down what one run did. ``None`` means the row moved and this gave way.
+
+    A recurring task never reaches ``fired`` or ``failed``; it goes back to
+    ``pending`` at its next occurrence. Including when it failed -- a nightly
+    job that errored once must still run tomorrow, and stopping the schedule on
+    the first bad night is precisely the silent failure recurrence exists to
+    remove. The error is logged by the caller and kept on the row, so a failed
+    run is visible without being terminal.
+    """
+    if task.repeat_seconds:
+        return db.mark_recurred(
+            task.id,
+            at=next_occurrence(task.at, task.repeat_seconds, now=moment),
+            fired_at=moment,
+            error=error,
+            expect_rev=expect_rev,
+        )
+    if error is not None:
+        return db.mark_failed(task.id, error, expect_rev=expect_rev)
+    return db.mark_fired(task.id, expect_rev=expect_rev)
+
+
+def run_once(
+    db: WakeDB, config: WakeConfig, *, owner: str | None = None, now: float | None = None
+) -> list[Task]:
+    """Fire every due task this machine owns once. Returns the tasks it acted on.
+
+    Ownership is the whole scheduling rule: the server fires unassigned tasks
+    and tasks addressed to it by name, a device fires only the tasks addressed
+    to it. No task is therefore claimed twice, without any lease or lock
+    crossing the network. ``owner`` overrides that for a caller that wants one
+    specific name; ``None`` means ``owned_by(config)``.
+    """
+    owners = owned_by(config) if owner is None else (owner,)
+    moment = time.time() if now is None else now
     handled = []
-    for task in db.due(owner, now=now):
+    for task in db.due(*owners, now=now):
         # Captured before the command runs: a self-re-arming task rewrites this
         # row while we are still holding it, and the bookkeeping below must
         # give way rather than stamp `fired` over the new `pending`.
@@ -150,17 +218,23 @@ def run_once(
             backends.fire(task, config)
         except backends.BackendError as exc:
             LOG.error("task %s (%s) failed: %s", task.id, task.backend, exc)
-            if db.mark_failed(task.id, str(exc), expect_rev=before) is None:
+            if record_run(db, task, error=str(exc), expect_rev=before, moment=moment) is None:
                 LOG.warning(
                     "task %s re-armed itself while failing; leaving it scheduled", task.id
                 )
             if task.then_do:
                 LOG.info("task %s: %s", task.id, finish_power(db, config, task, succeeded=False))
         else:
-            if db.mark_fired(task.id, expect_rev=before) is None:
+            settled = record_run(db, task, error=None, expect_rev=before, moment=moment)
+            if settled is None:
                 LOG.info(
                     "task %s (%s) fired and re-armed itself; leaving it scheduled",
                     task.id, task.backend,
+                )
+            elif task.repeat_seconds:
+                LOG.info(
+                    "task %s (%s) fired; next occurrence at %.0f",
+                    task.id, task.backend, settled.at,
                 )
             else:
                 LOG.info("task %s (%s) fired", task.id, task.backend)
@@ -201,7 +275,8 @@ def finish_power(db: WakeDB, config: WakeConfig, task: Task, *, succeeded: bool)
 
     armed = "no next task to arm"
     if succeeded:
-        upcoming = [t for t in db.tasks() if t.at > time.time() and t.owner == config.origin]
+        mine = owned_by(config)
+        upcoming = [t for t in db.tasks() if t.at > time.time() and t.owner in mine]
         if upcoming:
             nxt = min(upcoming, key=lambda t: t.at)
             try:
