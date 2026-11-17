@@ -52,6 +52,7 @@ class WakeConfig:
     poweroff_allow_match: str = ""  # regex; agent command lines matching it are furniture
     poweroff_allow_cmd: str = ""  # shell command printing more furniture names, one per line
     poweroff_grace_minutes: float = 45.0  # how long a poweroff waits out work in flight
+    rtc_min_period_minutes: float = 360.0  # recurring tasks more frequent than this never arm the rtc
     wol_broadcast: str = ""  # override the 255.255.255.255 default for the wol backend
     mac: str = ""  # this machine's MAC: what `wake add --backend wol` targets by default
     hotline_ios_url: str = ""  # e.g. http://192.0.2.10:8789, used by the notify backend
@@ -123,6 +124,13 @@ def load_config(path: Path | None = None) -> WakeConfig:
         except ValueError as exc:
             raise ConfigError(
                 f"POWEROFF_GRACE_MINUTES must be numeric, not {values['POWEROFF_GRACE_MINUTES']!r}"
+            ) from exc
+    if "RTC_MIN_PERIOD_MINUTES" in values:
+        try:
+            config.rtc_min_period_minutes = float(values["RTC_MIN_PERIOD_MINUTES"])
+        except ValueError as exc:
+            raise ConfigError(
+                f"RTC_MIN_PERIOD_MINUTES must be numeric, not {values['RTC_MIN_PERIOD_MINUTES']!r}"
             ) from exc
     if "WOL_BROADCAST" in values:
         config.wol_broadcast = values["WOL_BROADCAST"]

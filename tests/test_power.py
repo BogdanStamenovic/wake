@@ -393,3 +393,44 @@ def test_the_grace_period_runs_out_and_the_machine_stays_up(
     lines = server.retry_deferred_power(db, config, now=time.time() + 120)
     assert offs == [] and "gave up waiting" in lines[0]
     assert server._DEFERRED == {}
+
+
+def test_a_poweroff_does_not_wake_for_a_half_hourly_poller(
+    monkeypatch: pytest.MonkeyPatch, clean_deferred: Any
+) -> None:
+    """2026-11-17: the next archserver task was a 30-min poller, so the box would
+    have woken ~20 min after every poweroff and stayed up."""
+    from wake.config import WakeConfig
+    from wake.models import Task
+
+    server = clean_deferred
+    now = time.time()
+
+    def task(tid: str, at: float, every: float | None) -> Task:
+        return Task(
+            id=tid, task="true", at=at, backend="shell", target=None, status="pending",
+            origin="desktop", created_at=1.0, updated_at=1.0, rev=1, owner="desktop",
+            repeat_seconds=every,
+        )
+
+    class _DB:
+        def tasks(self, **kw: object) -> list[Task]:
+            return [task("poller", now + 1200, 1800.0), task("daily", now + 80000, 86400.0)]
+
+    armed: list[float] = []
+    monkeypatch.setattr(power, "presence", lambda **kw: Presence())
+    monkeypatch.setattr(power, "arm_wakealarm", armed.append)
+    monkeypatch.setattr(power, "suppress_watchdog", lambda: True)
+    monkeypatch.setattr(power, "power_off", lambda: None)
+    out = server.finish_power(
+        cast("Any", _DB()), WakeConfig(origin="desktop"), _poweroff_task(), succeeded=True
+    )
+    assert "rtc armed for daily" in out
+    assert armed == [now + 80000 - power.WAKE_LEAD_SECONDS]
+    # Negative case: with the floor at zero the poller wins again.
+    armed.clear()
+    server.finish_power(
+        cast("Any", _DB()), WakeConfig(origin="desktop", rtc_min_period_minutes=0),
+        _poweroff_task(), succeeded=True,
+    )
+    assert armed == [now + 1200 - power.WAKE_LEAD_SECONDS]

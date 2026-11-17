@@ -339,7 +339,16 @@ def _power_down(db: WakeDB, config: WakeConfig, succeeded: bool) -> str:
     armed = "no next task to arm"
     if succeeded:
         mine = owned_by(config)
-        upcoming = [t for t in db.tasks() if t.at > time.time() and t.owner in mine]
+        # A task repeating every half hour (a poller, a liveness check) only
+        # matters while the machine is up; waking for it would undo every
+        # poweroff within the hour (2026-11-17: llmserver-poll and a watchdog,
+        # both 30 min, owned by archserver). Such tasks catch up at next boot.
+        floor = config.rtc_min_period_minutes * 60
+        upcoming = [
+            t for t in db.tasks()
+            if t.at > time.time() and t.owner in mine
+            and not (t.repeat_seconds and t.repeat_seconds < floor)
+        ]
         if upcoming:
             nxt = min(upcoming, key=lambda t: t.at)
             try:

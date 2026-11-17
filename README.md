@@ -466,6 +466,7 @@ comments, quoting optional — same format as `profiler`'s env file.
 | `POWEROFF_ALLOW_AGENTS` | Comma-separated agent `--name`s that never block a `--then poweroff` | (unset) |
 | `POWEROFF_ALLOW_MATCH` | Regex; agent command lines matching it never block a poweroff | (unset) |
 | `POWEROFF_ALLOW_CMD` | Shell command printing more such names, one per line, asked at check time (e.g. `hotline --idle-names`). Any failure counts as no names | (unset) |
+| `RTC_MIN_PERIOD_MINUTES` | A poweroff arms the RTC for this machine's next task, skipping recurring tasks that repeat more often than this (pollers, liveness checks); they catch up at the next boot | `360` |
 | `POWEROFF_GRACE_MINUTES` | How long a poweroff waits, re-checking every minute, while only agents hold the machine up. A person at the machine cancels it at once | `45` |
 
 ## HTTP API
