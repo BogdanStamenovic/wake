@@ -463,6 +463,10 @@ comments, quoting optional — same format as `profiler`'s env file.
 | `HOTLINE_IOS_KEY` | `X-Hotline-Key` for those backends | (unset) |
 | `WOL_BROADCAST` | Default broadcast address for `wol` | `255.255.255.255` |
 | `MAC` | This machine's MAC; `wol` tasks with no `--target` use it | (unset) |
+| `POWEROFF_ALLOW_AGENTS` | Comma-separated agent `--name`s that never block a `--then poweroff` | (unset) |
+| `POWEROFF_ALLOW_MATCH` | Regex; agent command lines matching it never block a poweroff | (unset) |
+| `POWEROFF_ALLOW_CMD` | Shell command printing more such names, one per line, asked at check time (e.g. `hotline --idle-names`). Any failure counts as no names | (unset) |
+| `POWEROFF_GRACE_MINUTES` | How long a poweroff waits, re-checking every minute, while only agents hold the machine up. A person at the machine cancels it at once | `45` |
 
 ## HTTP API
 
@@ -539,6 +543,12 @@ written together, and a stub is exactly the layer that would agree with itself
 while the real pair disagreed.
 
 ## Limitations
+
+- A poweroff waiting out agents is remembered **in memory only**. Restarting
+  `wake agent` (a deploy, a crash) drops it, and the machine stays up. That is
+  deliberate: a decision taken before a restart should not act after it.
+- "Idle" is whatever `POWEROFF_ALLOW_CMD` says. With no command set, every named
+  agent session counts as work, including ones sitting idle at their prompt.
 
 - `rtcwake` tasks are armed once, immediately, on whichever machine ran `wake
   add`. There is no remote arming, and no re-arming if the machine reboots

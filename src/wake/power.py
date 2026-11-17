@@ -184,10 +184,34 @@ def foreign_agents(*, allow: set[str], allow_match: str = "") -> list[str]:
     return sorted(set(names))
 
 
-def presence(*, allow_agents: set[str] | None = None, allow_match: str = "") -> Presence:
+def allowed_by_command(command: str, timeout: float = 30.0) -> set[str]:
+    """Names a configured command says are furniture right now, one per line.
+
+    This is how a scheduler with no knowledge of any agent framework learns
+    which sessions are idle at their prompt: on archserver the command is
+    `hotline --idle-names`. Any failure yields no names, so a broken command
+    can only keep the machine up, never take it down under live work.
+    """
+    if not command:
+        return set()
+    try:
+        done = subprocess.run(
+            command, shell=True, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if done.returncode != 0:
+        return set()
+    return {line.strip() for line in done.stdout.splitlines() if line.strip()}
+
+
+def presence(
+    *, allow_agents: set[str] | None = None, allow_match: str = "", allow_cmd: str = ""
+) -> Presence:
+    allow = set(allow_agents or set()) | allowed_by_command(allow_cmd)
     return Presence(
         humans=human_signals(),
-        agents=foreign_agents(allow=set(allow_agents or set()), allow_match=allow_match),
+        agents=foreign_agents(allow=allow, allow_match=allow_match),
     )
 
 

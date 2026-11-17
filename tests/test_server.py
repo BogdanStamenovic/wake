@@ -513,6 +513,8 @@ def test_a_recurring_task_arms_the_rtc_for_its_own_next_occurrence(
 
 class _Clear:
     clear = True
+    humans: tuple[str, ...] = ()
+    agents: tuple[str, ...] = ()
 
     def why(self) -> str:
         return ""

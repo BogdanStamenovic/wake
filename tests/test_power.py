@@ -286,3 +286,110 @@ def test_a_refused_poweroff_puts_the_watchdog_back(monkeypatch: pytest.MonkeyPat
     )
     assert "poweroff FAILED" in outcome
     assert events == ["stopped", "restored"]
+
+
+def _poweroff_task() -> Any:
+    from wake.models import Task
+
+    return Task(
+        id="slot", task="true", at=1.0, backend="shell", target=None, status="pending",
+        origin="desktop", created_at=1.0, updated_at=1.0, rev=1, then_do="poweroff",
+    )
+
+
+class _NoTasks:
+    def tasks(self, **kw: object) -> list[Any]:
+        return []
+
+
+@pytest.fixture
+def clean_deferred() -> Any:
+    from wake import server
+
+    server._DEFERRED.clear()
+    yield server
+    server._DEFERRED.clear()
+
+
+def test_allow_command_names_are_furniture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2026-11-17: four idle never-sleep agents kept a WoL-woken box up all day."""
+    monkeypatch.setattr(power, "human_signals", list)
+    monkeypatch.setattr(
+        power, "_processes",
+        lambda: _processes(
+            (11, "claude", "claude --name manager-13"),
+            (12, "claude", "claude --name busy-one"),
+        ),
+    )
+    seen = power.presence(allow_cmd="printf 'manager-13\\n'")
+    assert seen.agents == ["busy-one"]
+    # Negative case: without the command the idle agent is work again.
+    assert power.presence().agents == ["busy-one", "manager-13"]
+
+
+def test_a_failing_allow_command_allows_nobody() -> None:
+    assert power.allowed_by_command("echo manager-13; exit 3") == set()
+    assert power.allowed_by_command("") == set()
+
+
+def test_work_in_flight_defers_the_poweroff_then_powers_off(
+    monkeypatch: pytest.MonkeyPatch, clean_deferred: Any
+) -> None:
+    from wake.config import WakeConfig
+
+    server = clean_deferred
+    state = {"agents": ["manager-13"]}
+    offs: list[str] = []
+    monkeypatch.setattr(power, "presence", lambda **kw: Presence(agents=list(state["agents"])))
+    monkeypatch.setattr(power, "suppress_watchdog", lambda: True)
+    monkeypatch.setattr(power, "power_off", lambda: offs.append("off"))
+    config = WakeConfig(origin="desktop")
+    db = cast("Any", _NoTasks())
+
+    first = server.finish_power(db, config, _poweroff_task(), succeeded=True)
+    assert first.startswith("waiting up to 45 min")
+    assert offs == []
+    assert server.retry_deferred_power(db, config, now=time.time()) == []  # still busy
+    state["agents"] = []
+    lines = server.retry_deferred_power(db, config, now=time.time() + 61)
+    assert offs == ["off"] and lines and "powering off" in lines[0]
+    assert server._DEFERRED == {}
+
+
+def test_a_person_cancels_a_deferred_poweroff(
+    monkeypatch: pytest.MonkeyPatch, clean_deferred: Any
+) -> None:
+    from wake.config import WakeConfig
+
+    server = clean_deferred
+    state: dict[str, list[str]] = {"agents": ["manager-13"], "humans": []}
+    offs: list[str] = []
+    monkeypatch.setattr(
+        power, "presence",
+        lambda **kw: Presence(humans=list(state["humans"]), agents=list(state["agents"])),
+    )
+    monkeypatch.setattr(power, "power_off", lambda: offs.append("off"))
+    config = WakeConfig(origin="desktop")
+    db = cast("Any", _NoTasks())
+    server.finish_power(db, config, _poweroff_task(), succeeded=True)
+    state["humans"] = ["an ssh login"]
+    lines = server.retry_deferred_power(db, config, now=time.time() + 61)
+    assert offs == [] and "someone is using this machine" in lines[0]
+    assert server._DEFERRED == {}
+
+
+def test_the_grace_period_runs_out_and_the_machine_stays_up(
+    monkeypatch: pytest.MonkeyPatch, clean_deferred: Any
+) -> None:
+    from wake.config import WakeConfig
+
+    server = clean_deferred
+    offs: list[str] = []
+    monkeypatch.setattr(power, "presence", lambda **kw: Presence(agents=["long-job"]))
+    monkeypatch.setattr(power, "power_off", lambda: offs.append("off"))
+    config = WakeConfig(origin="desktop", poweroff_grace_minutes=1)
+    db = cast("Any", _NoTasks())
+    server.finish_power(db, config, _poweroff_task(), succeeded=True)
+    lines = server.retry_deferred_power(db, config, now=time.time() + 120)
+    assert offs == [] and "gave up waiting" in lines[0]
+    assert server._DEFERRED == {}

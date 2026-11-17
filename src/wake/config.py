@@ -50,6 +50,8 @@ class WakeConfig:
     sync_seconds: float = 60.0  # how often `wake agent` reconciles with the server
     poweroff_allow_agents: str = ""  # agent --name values that never block a poweroff
     poweroff_allow_match: str = ""  # regex; agent command lines matching it are furniture
+    poweroff_allow_cmd: str = ""  # shell command printing more furniture names, one per line
+    poweroff_grace_minutes: float = 45.0  # how long a poweroff waits out work in flight
     wol_broadcast: str = ""  # override the 255.255.255.255 default for the wol backend
     mac: str = ""  # this machine's MAC: what `wake add --backend wol` targets by default
     hotline_ios_url: str = ""  # e.g. http://192.0.2.10:8789, used by the notify backend
@@ -113,6 +115,15 @@ def load_config(path: Path | None = None) -> WakeConfig:
         except re.error as exc:
             raise ConfigError(f"POWEROFF_ALLOW_MATCH is not a valid regex: {exc}") from exc
         config.poweroff_allow_match = values["POWEROFF_ALLOW_MATCH"]
+    if "POWEROFF_ALLOW_CMD" in values:
+        config.poweroff_allow_cmd = values["POWEROFF_ALLOW_CMD"]
+    if "POWEROFF_GRACE_MINUTES" in values:
+        try:
+            config.poweroff_grace_minutes = float(values["POWEROFF_GRACE_MINUTES"])
+        except ValueError as exc:
+            raise ConfigError(
+                f"POWEROFF_GRACE_MINUTES must be numeric, not {values['POWEROFF_GRACE_MINUTES']!r}"
+            ) from exc
     if "WOL_BROADCAST" in values:
         config.wol_broadcast = values["WOL_BROADCAST"]
     if "MAC" in values:

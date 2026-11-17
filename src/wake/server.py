@@ -13,6 +13,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -209,6 +210,8 @@ def run_once(
     owners = owned_by(config) if owner is None else (owner,)
     moment = time.time() if now is None else now
     handled = []
+    for line in retry_deferred_power(db, config, now=moment):
+        LOG.info("%s", line)
     for task in db.due(*owners, now=now):
         # Captured before the command runs: a self-re-arming task rewrites this
         # row while we are still holding it, and the bookkeeping below must
@@ -266,13 +269,73 @@ def finish_power(db: WakeDB, config: WakeConfig, task: Task, *, succeeded: bool)
     if task.then_do != "poweroff":
         return "nothing to do"
 
-    seen = power.presence(
-        allow_agents={n for n in config.poweroff_allow_agents.split(",") if n.strip()},
-        allow_match=config.poweroff_allow_match,
-    )
-    if not seen.clear:
+    seen = _presence(config)
+    if seen.humans:
+        _DEFERRED.pop(task.id, None)
         return f"staying up: {seen.why()}"
+    if seen.agents:
+        # Agents finish; people stay. Work in flight right after a boot is
+        # usually sessions a keepalive just revived, still reading their
+        # wake-up message: on 2026-11-17 four of them kept a WoL-woken box up
+        # all day because this check looked once and gave up. So wait them
+        # out, re-checking, for a bounded grace period.
+        if task.id not in _DEFERRED:
+            _DEFERRED[task.id] = _Deferred(
+                task=task,
+                succeeded=succeeded,
+                until=time.time() + config.poweroff_grace_minutes * 60,
+            )
+            return (
+                f"waiting up to {config.poweroff_grace_minutes:g} min before powering off; "
+                f"{seen.why()}"
+            )
+        return f"still waiting: {seen.why()}"
+    _DEFERRED.pop(task.id, None)
+    return _power_down(db, config, succeeded)
 
+
+@dataclass
+class _Deferred:
+    task: Task
+    succeeded: bool
+    until: float
+    next_check: float = 0.0
+
+
+# In memory on purpose: a restart of the agent means a reboot or a deploy, and
+# neither should resume a poweroff decided before it.
+_DEFERRED: dict[str, _Deferred] = {}
+RECHECK_SECONDS = 60.0
+
+
+def _presence(config: WakeConfig) -> power.Presence:
+    return power.presence(
+        allow_agents={n.strip() for n in config.poweroff_allow_agents.split(",") if n.strip()},
+        allow_match=config.poweroff_allow_match,
+        allow_cmd=config.poweroff_allow_cmd,
+    )
+
+
+def retry_deferred_power(db: WakeDB, config: WakeConfig, *, now: float | None = None) -> list[str]:
+    """Re-check poweroffs that were waiting for work in flight. Returns log lines."""
+    moment = time.time() if now is None else now
+    out = []
+    for task_id, entry in list(_DEFERRED.items()):
+        if moment < entry.next_check:
+            continue
+        entry.next_check = moment + RECHECK_SECONDS
+        if moment >= entry.until:
+            _DEFERRED.pop(task_id, None)
+            seen = _presence(config)
+            out.append(f"task {task_id}: gave up waiting, staying up: {seen.why()}")
+            continue
+        result = finish_power(db, config, entry.task, succeeded=entry.succeeded)
+        if not result.startswith("still waiting"):
+            out.append(f"task {task_id}: {result}")
+    return out
+
+
+def _power_down(db: WakeDB, config: WakeConfig, succeeded: bool) -> str:
     armed = "no next task to arm"
     if succeeded:
         mine = owned_by(config)
